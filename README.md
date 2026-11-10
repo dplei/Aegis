@@ -1,43 +1,92 @@
-# Aegis
+<p align="center">
+  <img src="src-tauri/icons/128x128.png" width="88" alt="Aegis" />
+</p>
 
-游戏一打开就自动录，游戏关掉时问要不要留、叫什么名字。Windows + NVIDIA 显卡。
+<h1 align="center">Aegis</h1>
 
-录制内核是 [libobs-rs](https://github.com/libobs-rs/libobs-rs)（OBS 32.1），外壳是 Tauri 2：
+<p align="center">
+  替你守着每一局。<br />
+  <sub>A quiet shield for the games you play.</sub>
+</p>
 
-- 画面：WGC 抓游戏窗口（不注入进程），或者抓游戏所在的整个显示器。
-- 声音：OBS 的应用音频捕获，跟着当前录的窗口走；另外可选麦克风。
-- 编码：NVENC HEVC，纹理编码，画面全程在显存里；输出分片 MP4。
+<p align="center">
+  <a href="https://github.com/dplei/Aegis/releases/latest">下载</a> ·
+  <a href="#开始">开始</a> ·
+  <a href="#从源码构建">从源码构建</a>
+</p>
 
-## 开发
+<br />
+
+Aegis，是神话里雅典娜那面盾的名字。
+
+它不替你上场，只在旁边守着。游戏一打开，它就开始记；游戏一关，它轻轻问一句：这一局，要留下吗？
+
+留下，就按你定的名字存好；不留，就放进回收站，反悔了还能捡回来。
+
+## 它会做的事
+
+**认得你的游戏。** 按进程名识别。英雄联盟、无畏契约、三角洲行动、Apex 已经放在列表里了，别的游戏开着的时候，从设置里点一下就能加进来。客户端和对局是两个窗口也没关系，进了对局它跟过去，回到大厅再跟回来，全都录在同一个文件里。
+
+**只看游戏。** 用 Windows Graphics Capture 抓游戏窗口，被别的窗口挡住也照样录得到。不往游戏进程里注入任何东西，也不去读它的内存。
+
+**声音跟着画面。** 录的是游戏自己的声音，微信、音乐这些不会混进来；麦克风可以开，录制中也能在托盘里一键静音。音画对齐在几毫秒以内。
+
+**不拖慢游戏。** NVENC 硬件编码，画面从抓取到编码都在显存里。1080p 60 帧，每小时大约 5 GB。
+
+**安静地待着。** 平时只是托盘里一个小图标；录制时，中间那点亮起红光。
+
+## 开始
+
+1. 从 [Releases](https://github.com/dplei/Aegis/releases/latest) 下载安装包，装好。
+   签名还在申请中，Windows 可能弹出“已保护你的电脑”，点“更多信息”，再点“仍要运行”。
+2. 打开 Aegis，在设置里勾上要录的游戏，选好保存目录。
+3. 去玩吧。
+
+需要 Windows 10 2004 或更新的系统，以及一块 NVIDIA 显卡。
+
+### 文件名
+
+默认是 `${game}_${time:YYYY-MM-DD HH:mm:ss}`，录出来像这样：
+
+```
+LOL_2026-11-10 21-55-02.mp4
+```
+
+`${game}` 是游戏名，`${time:…}` 是开始录制的时间，写法和 dayjs 一样。Windows 的文件名不能有冒号，所以冒号会换成 `-`。
+
+## 从源码构建
+
+外壳是 Tauri 2，录制交给 [libobs-rs](https://github.com/libobs-rs/libobs-rs)，也就是 OBS 32.1 的内核。
 
 ```bash
 pnpm install
 cargo install cargo-obs-build
 cd src-tauri
-cargo obs-build build --out-dir target/debug --remove-pdbs   # OBS 运行时，约 85MB
+cargo obs-build build --out-dir target/debug --remove-pdbs   # OBS 运行时，约 85 MB
 cd ..
 pnpm tauri dev
 ```
 
-## 打包
+打包：
 
 ```bash
 cd src-tauri && cargo obs-build build --out-dir ../obs-runtime --remove-pdbs && cd ..
 pnpm tauri build    # 安装包在 src-tauri/target/release/bundle/nsis/
 ```
 
-`obs-runtime/` 会作为资源装到 exe 旁边。打包前建议删掉 `obs-runtime/obs-plugins/64bit/rtmp-services.dll` 和 `obs-runtime/data/obs-plugins/rtmp-services/`：这个插件只给直播用，每次启动都会联网更新平台列表。
+`obs-runtime/` 会作为资源装在 exe 旁边。打包前建议删掉 `obs-runtime/obs-plugins/64bit/rtmp-services.dll` 和 `obs-runtime/data/obs-plugins/rtmp-services/`，这个插件只给直播用，每次启动都会联网更新平台列表。
 
-## 发版
+发版：改好 `src-tauri/tauri.conf.json` 里的 `version` 并提交，推一个同名的 tag，比如 `v0.1.1`。[release.yml](.github/workflows/release.yml) 会在 Windows 上打包，并把安装包发到 Releases；tag 和 `version` 对不上时会直接失败。
 
-改好 `src-tauri/tauri.conf.json` 里的 `version` 并提交，然后推同名 tag：
+代码不多，五个文件：
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-`.github/workflows/release.yml` 会在 Windows 上打包，把安装包发到 GitHub Release。tag 和 `version` 不一致时会直接失败。
+| 文件 | 做什么 |
+|---|---|
+| `src-tauri/src/recorder.rs` | 盯着进程，开始、切换、结束录制 |
+| `src-tauri/src/config.rs` | 配置、游戏预设、文件名模板 |
+| `src-tauri/src/win.rs` | 进程、窗口、显示器、磁盘、回收站 |
+| `src-tauri/src/main.rs` | 托盘、窗口、前端命令 |
+| `ui/` | 设置页和保存弹窗，原生 HTML |
 
 ## Code signing policy
 
@@ -66,10 +115,6 @@ Aegis works fully offline: no uploads, no telemetry, no update checks. Recording
 [GPL-3.0](LICENSE). The recording core, libobs, is GPL-licensed, so this project is released under GPL-3.0.
 （录制内核 libobs 是 GPL 许可，本项目随之采用 GPL-3.0。）
 
-## 代码
+<br />
 
-- `src-tauri/src/recorder.rs`：轮询进程，开始、切换、结束录制。
-- `src-tauri/src/config.rs`：配置、游戏预设、文件名模板。
-- `src-tauri/src/win.rs`：进程、窗口、显示器、磁盘、回收站、麦克风列表。
-- `src-tauri/src/main.rs`：托盘、窗口、前端命令。
-- `ui/`：设置页和保存弹窗，原生 HTML，没有构建步骤。
+<p align="center"><sub>精彩的一局，不该只活在记忆里。</sub></p>
