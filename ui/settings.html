@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aegis 设置</title>
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Aegis</h1>
+      <button class="icon-btn" type="button" aria-label="切换亮/暗色" onclick="toggleTheme()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg>
+      </button>
+    </header>
+    <p class="desc">游戏一打开就开始录，游戏关掉时问你要不要留。改动会自动保存。</p>
+
+    <section aria-labelledby="g-games">
+      <div class="head">
+        <h2 id="g-games" class="label">游戏</h2>
+        <p class="desc">按进程名识别。一个游戏可以有多个进程，排在前面的窗口优先录（比如对局优先于客户端）。</p>
+      </div>
+      <div id="games"></div>
+      <div class="row" style="border-bottom:0">
+        <button class="link" type="button" id="add-toggle" aria-expanded="false">从正在运行的程序添加</button>
+      </div>
+      <div class="collapse" id="add-panel"><div><div id="running" style="padding:0 0 .5rem"></div></div></div>
+    </section>
+
+    <section aria-labelledby="g-rec">
+      <div class="head">
+        <h2 id="g-rec" class="label">录制</h2>
+        <p class="desc" id="rec-meta"></p>
+      </div>
+      <div class="row">
+        <div class="grow"><strong>录制范围</strong><p class="meta">只录游戏画面时，被别的窗口挡住也照样录到游戏</p></div>
+        <div class="seg" id="scope"></div>
+      </div>
+      <div class="row">
+        <div class="grow"><strong>分辨率</strong></div>
+        <div class="seg" id="res"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="g-audio">
+      <div class="head">
+        <h2 id="g-audio" class="label">声音</h2>
+        <p class="desc">游戏声音和麦克风混成一条音轨。录制中可以在托盘菜单里一键静音麦克风。</p>
+      </div>
+      <div class="row">
+        <button class="switch grow" type="button" role="switch" id="mic"><span class="track"></span><span>录麦克风</span></button>
+      </div>
+      <label class="field"><span>麦克风设备</span><select class="input" id="mic-dev"></select></label>
+    </section>
+
+    <section aria-labelledby="g-save">
+      <div class="head">
+        <h2 id="g-save" class="label">保存</h2>
+        <p class="desc">剩余空间不到 5GB 时不开始录；录到不足 1GB 时停下并保存已录部分。</p>
+      </div>
+      <label class="field"><span>保存目录</span>
+        <div class="inline"><input class="input" id="dir" spellcheck="false" /><button class="ghost" type="button" id="open-dir">打开</button></div>
+      </label>
+      <label class="field"><span>默认文件名</span>
+        <input class="input" id="tpl" spellcheck="false" />
+        <span class="meta" id="tpl-preview"></span>
+      </label>
+      <div class="help" style="padding:0 .5rem">
+        <p><code>${game}</code> 游戏名，就是上面列表里的名字</p>
+        <p><code>${time:格式}</code> 开始录制的时间，格式写法同 dayjs，如 <code>YYYY-MM-DD HH:mm:ss</code>；想要别的写法可以直接问 AI</p>
+        <p>文件名里不能用的字符会自动替换，冒号变成全角「：」</p>
+      </div>
+    </section>
+
+    <section aria-labelledby="g-misc">
+      <div class="head"><h2 id="g-misc" class="label">其他</h2></div>
+      <div class="row">
+        <button class="switch grow" type="button" role="switch" id="autostart"><span class="track"></span><span>开机自动启动，常驻托盘</span></button>
+      </div>
+    </section>
+    <p class="toast" id="toast" style="margin-top:2rem"></p>
+  </div>
+
+<script>
+const { invoke } = window.__TAURI__.core
+const $ = (id) => document.getElementById(id)
+let cfg
+let saveTimer, toastTimer
+
+function toast(msg) {
+  $('toast').textContent = msg
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => ($('toast').textContent = ''), 2500)
+}
+function save() {
+  clearTimeout(saveTimer)
+  saveTimer = setTimeout(async () => {
+    try { await invoke('set_config', { cfg }); toast('已保存') } catch (e) { toast('保存失败：' + e) }
+  }, 300)
+}
+function seg(el, options, value, onPick) {
+  el.replaceChildren(...options.map(([v, text]) => {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.textContent = text
+    b.setAttribute('aria-pressed', String(v === value))
+    b.onclick = () => { onPick(v); render() }
+    return b
+  }))
+}
+function sw(el, on, onToggle) {
+  el.setAttribute('aria-checked', String(on))
+  el.onclick = () => { onToggle(!on); render() }
+}
+const SCOPE_G = [[null, '跟随全局'], ['window', '只录窗口'], ['monitor', '录全屏']]
+
+function renderGames() {
+  $('games').replaceChildren(...cfg.games.map((g, i) => {
+    const row = document.createElement('div')
+    row.className = 'row'
+    row.innerHTML = `
+      <button class="switch" type="button" role="switch" aria-label="启用 ${g.name}"><span class="track"></span></button>
+      <div class="grow">
+        <input class="input" value="" aria-label="游戏名" style="padding:.25rem .5rem;width:12rem" />
+        <p class="meta" style="margin-top:.25rem">${g.exes.map(e => e.replace(/</g, '&lt;')).join(' · ')}</p>
+      </div>
+      <div class="seg"></div>
+      <button class="link danger" type="button">删除</button>`
+    const [s, name, segEl, del] = [row.querySelector('.switch'), row.querySelector('input'), row.querySelector('.seg'), row.querySelector('.danger')]
+    name.value = g.name
+    name.onchange = () => { g.name = name.value.trim() || g.name; save(); render() }
+    sw(s, g.enabled, (v) => { g.enabled = v; save() })
+    seg(segEl, SCOPE_G, g.scope ?? null, (v) => { g.scope = v; save() })
+    del.onclick = () => {
+      if (!del.classList.contains('arm')) {
+        del.classList.add('arm'); del.textContent = '确认删除'
+        setTimeout(() => { del.classList.remove('arm'); del.textContent = '删除' }, 3000)
+        return
+      }
+      cfg.games.splice(i, 1); save(); render()
+    }
+    return row
+  }))
+}
+
+function render() {
+  renderGames()
+  seg($('scope'), [['window', '只录游戏画面'], ['monitor', '整个屏幕']], cfg.scope, (v) => { cfg.scope = v; save() })
+  seg($('res'), [[480, '480p'], [720, '720p'], [1080, '1080p'], [1440, '1440p'], [0, '跟随显示器']], cfg.resolution, (v) => { cfg.resolution = v; save() })
+  const h = cfg.resolution || 2160
+  const mbps = Math.min(60, Math.max(2.5, 12 * (h * h) / (1080 * 1080)))
+  $('rec-meta').textContent = `HEVC 硬件编码（NVENC）· 60fps · ${cfg.resolution ? '' : '以 4K 显示器为例 '}约 ${mbps.toFixed(1)} Mbps，每小时约 ${(mbps * 0.45).toFixed(1)} GB`
+  sw($('mic'), cfg.mic_enabled, (v) => { cfg.mic_enabled = v; save() })
+  $('mic-dev').disabled = !cfg.mic_enabled
+  sw($('autostart'), cfg.autostart, (v) => { cfg.autostart = v; save() })
+  if (document.activeElement !== $('dir')) $('dir').value = cfg.out_dir
+  if (document.activeElement !== $('tpl')) $('tpl').value = cfg.name_template
+  preview()
+}
+async function preview() {
+  const game = cfg.games[0]?.name ?? 'LOL'
+  $('tpl-preview').textContent = '预览：' + await invoke('preview_name', { template: cfg.name_template, game })
+}
+
+$('dir').onchange = () => { cfg.out_dir = $('dir').value.trim(); save() }
+$('tpl').oninput = () => { cfg.name_template = $('tpl').value; preview(); save() }
+$('open-dir').onclick = () => invoke('open_folder')
+$('mic-dev').onchange = () => { cfg.mic_device = $('mic-dev').value || null; save() }
+
+$('add-toggle').onclick = async () => {
+  const open = !$('add-panel').classList.contains('open')
+  $('add-toggle').setAttribute('aria-expanded', String(open))
+  $('add-panel').classList.toggle('open', open)
+  if (!open) return
+  $('running').textContent = '读取中…'
+  const list = await invoke('list_windows')
+  $('running').replaceChildren(...list.map((w) => {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'pick'
+    b.innerHTML = '<strong></strong><span class="meta"></span>'
+    b.children[0].textContent = w.exe
+    b.children[1].textContent = w.title
+    b.onclick = () => {
+      const hit = cfg.games.find(g => g.exes.some(e => e.toLowerCase() === w.exe.toLowerCase()))
+      if (hit) return toast(`${w.exe} 已经在「${hit.name}」里了`)
+      cfg.games.push({ name: w.exe.replace(/\.exe$/i, ''), exes: [w.exe], enabled: true, scope: null })
+      save(); render(); toast(`已添加 ${w.exe}，可以在上面改名`)
+    }
+    return b
+  }))
+}
+
+;(async () => {
+  cfg = await invoke('get_config')
+  const mics = await invoke('list_mics')
+  $('mic-dev').replaceChildren(new Option('系统默认麦克风', ''), ...mics.map(([id, name]) => new Option(name, id)))
+  $('mic-dev').value = cfg.mic_device ?? ''
+  render()
+})()
+</script>
+</body>
+</html>

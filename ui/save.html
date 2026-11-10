@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>保存录像</title>
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap" style="padding-top:1.5rem">
+    <h1 style="font-size:1.125rem">录完了，留下吗？</h1>
+    <p class="desc" id="count"></p>
+    <label class="field" style="padding:1rem 0 .25rem"><span>文件名</span>
+      <input class="input" id="name" spellcheck="false" />
+    </label>
+    <p class="meta" id="path"></p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:1.25rem">
+      <button class="link danger" type="button" id="discard">不保存</button>
+      <button class="btn" type="button" id="save">保存</button>
+    </div>
+    <p class="toast" id="toast" style="margin-top:.75rem"></p>
+  </div>
+<script>
+const { invoke } = window.__TAURI__.core
+const $ = (id) => document.getElementById(id)
+let cur
+
+async function load() {
+  const list = await invoke('get_pending')
+  if (!list.length) return window.__TAURI__.window.getCurrentWindow().close()
+  cur = list[0]
+  const file = cur.split(/[\\/]/).pop()
+  $('name').value = file.replace(/\.mp4$/i, '')
+  $('path').textContent = cur
+  $('count').textContent = list.length > 1 ? `还有 ${list.length - 1} 段等着处理` : '已经按默认名存好了，不处理也不会丢。'
+  $('discard').classList.remove('arm'); $('discard').textContent = '不保存'
+  $('name').focus(); $('name').select()
+}
+async function resolve(name) {
+  try { await invoke('resolve_pending', { path: cur, name }); load() } catch (e) { $('toast').textContent = String(e) }
+}
+$('save').onclick = () => resolve($('name').value.trim() || $('name').placeholder)
+$('name').onkeydown = (e) => { if (e.key === 'Enter') $('save').click() }
+$('discard').onclick = () => {
+  const d = $('discard')
+  if (!d.classList.contains('arm')) { d.classList.add('arm'); d.textContent = '确认移到回收站'; return }
+  resolve(null)
+}
+window.__TAURI__.event.listen('refresh', load)
+load()
+</script>
+</body>
+</html>
