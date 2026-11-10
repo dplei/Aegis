@@ -39,6 +39,33 @@ git push origin v0.1.0
 
 `.github/workflows/release.yml` 会在 Windows 上打包，把安装包发到 GitHub Release。tag 和 `version` 不一致时会直接失败。
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+The SignPath Foundation application is under review. Releases published before approval are unsigned.
+（签名申请审核中，通过之前发布的安装包仍是未签名的。）
+
+Team roles:
+
+- Committers and reviewers: [dplei](https://github.com/dplei)
+- Approvers: [dplei](https://github.com/dplei)
+
+Only installers built automatically from this repository's source by GitHub Actions are signed. The bundled OBS Studio runtime consists of unmodified official OBS release files and is not signed by this project.
+（只签本仓库源码经 GitHub Actions 自动构建的安装包；随包附带的 OBS 运行时是 OBS 官方原版文件，不由本项目签名。）
+
+## Privacy
+
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+
+Aegis works fully offline: no uploads, no telemetry, no update checks. Recordings are stored only in the save folder you choose, and settings only in `%APPDATA%\app.aegis.recorder`. The OBS `rtmp-services` plugin, the only OBS component that contacts the network (to update its streaming service list), is removed from release builds.
+（Aegis 不联网：不上传、不统计、不检查更新。录像只存在你设置的保存目录，配置只存在 `%APPDATA%\app.aegis.recorder`。打包时去掉了 OBS 里唯一会联网的直播插件 `rtmp-services`。）
+
+## License
+
+[GPL-3.0](LICENSE). The recording core, libobs, is GPL-licensed, so this project is released under GPL-3.0.
+（录制内核 libobs 是 GPL 许可，本项目随之采用 GPL-3.0。）
+
 ## 代码
 
 - `src-tauri/src/recorder.rs`：轮询进程，开始、切换、结束录制。

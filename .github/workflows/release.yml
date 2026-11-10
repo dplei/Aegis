@@ -54,4 +54,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          gh release create "${{ github.ref_name }}" $exe.FullName --title "Aegis ${{ github.ref_name }}" --generate-notes
+          gh release create "${{ github.ref_name }}" $exe.FullName --title "Aegis ${{ github.ref_name }}" --generate-notes `
+            --notes "Windows 10/11 + NVIDIA 显卡。Code signing policy：https://github.com/${{ github.repository }}#code-signing-policy"

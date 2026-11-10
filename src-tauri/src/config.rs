@@ -152,13 +152,13 @@ fn format_time(fmt: &str, t: DateTime<Local>) -> String {
     out
 }
 
-/// Windows 文件名：冒号换全角，其余非法字符换 _，去掉结尾的点和空格。
+/// Windows 文件名不能有半角冒号：冒号换成 -，其余非法字符换 _，去掉结尾的点和空格。
 pub fn sanitize(name: &str) -> String {
     let s: String = name
         .chars()
         .filter(|c| !c.is_control())
         .map(|c| match c {
-            ':' => '：',
+            ':' => '-',
             '\\' | '/' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             c => c,
         })
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn template() {
         let t = Local.with_ymd_and_hms(2026, 3, 7, 21, 5, 9).unwrap();
-        assert_eq!(render_name(DEFAULT_TEMPLATE, "LOL", t), "LOL_2026-03-07 21：05：09");
+        assert_eq!(render_name(DEFAULT_TEMPLATE, "LOL", t), "LOL_2026-03-07 21-05-09");
         assert_eq!(render_name("${game} Delta ${time:YY.M.D h[点]}", "Apex", t), "Apex Delta 26.3.7 9点");
         assert_eq!(render_name("${foo}/${game", "X", t), "${foo}_${game");
         assert_eq!(render_name("  ...", "X", t), "recording");
