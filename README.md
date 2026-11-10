@@ -26,7 +26,18 @@ cd src-tauri && cargo obs-build build --out-dir ../obs-runtime --remove-pdbs && 
 pnpm tauri build    # 安装包在 src-tauri/target/release/bundle/nsis/
 ```
 
-`obs-runtime/` 会作为资源装到 exe 旁边。
+`obs-runtime/` 会作为资源装到 exe 旁边。打包前建议删掉 `obs-runtime/obs-plugins/64bit/rtmp-services.dll` 和 `obs-runtime/data/obs-plugins/rtmp-services/`：这个插件只给直播用，每次启动都会联网更新平台列表。
+
+## 发版
+
+改好 `src-tauri/tauri.conf.json` 里的 `version` 并提交，然后推同名 tag：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` 会在 Windows 上打包，把安装包发到 GitHub Release。tag 和 `version` 不一致时会直接失败。
 
 ## 代码
 

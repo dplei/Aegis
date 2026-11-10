@@ -1,0 +1,57 @@
+# 推一个 v* tag（如 v0.1.0）就打包 Windows 安装包并发布到 GitHub Release。
+# tag 必须和 src-tauri/tauri.conf.json 里的 version 一致，否则直接失败。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查 tag 和版本号一致
+        shell: pwsh
+        run: |
+          $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} 和 tauri.conf.json 的 version $v 不一致" }
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 准备 OBS 运行时
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # cargo-obs-build 下载 OBS 时避开 GitHub 限流
+        run: |
+          cargo install cargo-obs-build --locked
+          cd src-tauri
+          cargo obs-build build --out-dir ../obs-runtime --remove-pdbs
+          # 不做直播：去掉启动时会联网更新平台列表的 rtmp-services 插件
+          Remove-Item -Force ../obs-runtime/obs-plugins/64bit/rtmp-services.dll -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force ../obs-runtime/data/obs-plugins/rtmp-services -ErrorAction SilentlyContinue
+
+      - run: pnpm tauri build
+
+      - name: 发布到 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          gh release create "${{ github.ref_name }}" $exe.FullName --title "Aegis ${{ github.ref_name }}" --generate-notes
