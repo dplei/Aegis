@@ -20,6 +20,8 @@ struct State {
     muted: Arc<AtomicBool>,
     tx: Mutex<Sender<recorder::Cmd>>,
     status: MenuItem<Wry>,
+    /// 正在录制：托盘图标闪红点
+    recording: Arc<AtomicBool>,
 }
 
 fn st(app: &AppHandle) -> tauri::State<'_, State> {
@@ -37,10 +39,12 @@ fn save_config(app: &AppHandle, cfg: &Config) {
 }
 
 pub fn notify(app: &AppHandle, msg: &str) {
+    eprintln!("[Aegis] {msg}"); // 通知可能被系统收起或屏蔽，日志里总留一份
     let _ = app.notification().builder().title("Aegis").body(msg).show();
 }
 
 pub fn set_status(app: &AppHandle, game: Option<&str>) {
+    st(app).recording.store(game.is_some(), Relaxed);
     let text = match game {
         Some(g) => format!("● 正在录制：{g}"),
         None => "空闲：等待游戏启动".into(),
@@ -70,11 +74,17 @@ fn show_window(app: &AppHandle, label: &str) {
             let _ = w.set_focus();
             return;
         }
-        let (title, w, h, top) = if label == "save" { ("保存录像", 480.0, 360.0, true) } else { ("Aegis 设置", 760.0, 720.0, false) };
+        let (title, w, h, top) = if label == "save" { ("保存录像", 480.0, 380.0, true) } else { ("Aegis 设置", 760.0, 720.0, false) };
         let _ = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("{label}.html").into()))
             .title(title)
             .inner_size(w, h)
             .always_on_top(top)
+            // 不要系统标题栏，顶栏在页面里自己画；底色和页面一致，避免打开时白闪
+            .decorations(false)
+            .shadow(true)
+            .background_color(tauri::window::Color(10, 10, 10, 255))
+            .min_inner_size(if top { w } else { 640.0 }, if top { h } else { 480.0 })
+            .resizable(!top)
             .center()
             .build();
     });
@@ -172,6 +182,59 @@ fn resolve_pending(app: AppHandle, path: PathBuf, name: Option<String>) -> Resul
     Ok(result)
 }
 
+#[derive(serde::Serialize)]
+struct DirCheck {
+    exists: bool,
+    /// 所在磁盘剩余空间（GB）
+    free_gb: f64,
+    /// Some = 不能用，原因
+    error: Option<String>,
+}
+
+/// 检查保存目录能不能用：绝对路径、不是文件、可写；不存在时只报告，交给前端问要不要新建。
+#[tauri::command]
+fn check_dir(path: String) -> DirCheck {
+    let p = PathBuf::from(path.trim());
+    let disk = p.ancestors().find(|a| a.exists()).unwrap_or(&p);
+    let free_gb = win::disk_free(disk) as f64 / (1u64 << 30) as f64;
+    let fail = |e: &str| DirCheck { exists: p.exists(), free_gb, error: Some(e.into()) };
+    if !p.is_absolute() {
+        return fail("请填写完整路径，比如 D:\\Videos\\Aegis");
+    }
+    if p.exists() && !p.is_dir() {
+        return fail("这是一个文件，不是文件夹");
+    }
+    if !p.exists() {
+        return DirCheck { exists: false, free_gb, error: None };
+    }
+    let probe = p.join(".aegis-write-test");
+    if std::fs::write(&probe, b"").is_err() {
+        return fail("这个文件夹没有写入权限");
+    }
+    let _ = std::fs::remove_file(probe);
+    DirCheck { exists: true, free_gb, error: None }
+}
+
+#[tauri::command]
+fn make_dir(path: String) -> Result<(), String> {
+    std::fs::create_dir_all(path.trim()).map_err(|e| format!("新建失败：{e}"))
+}
+
+/// Windows 原生的文件夹选择窗口，从当前目录（或它最近的已存在上级）开始。
+#[tauri::command]
+async fn pick_dir(app: AppHandle, current: String) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let start = PathBuf::from(current.trim());
+    let mut d = app.dialog().file().set_title("选择保存目录");
+    if let Some(dir) = start.ancestors().find(|a| a.is_dir()) {
+        d = d.set_directory(dir);
+    }
+    if let Some(w) = app.get_webview_window("settings") {
+        d = d.set_parent(&w);
+    }
+    d.blocking_pick_folder()?.into_path().ok().map(|p| p.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn open_folder(app: AppHandle) {
     let dir = config_snapshot(&app).out_dir;
@@ -189,8 +252,9 @@ fn main() {
             Some(vec!["--autostart"]),
         ))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            get_config, set_config, preview_name, list_windows, list_mics, get_pending, resolve_pending, open_folder
+            get_config, set_config, preview_name, list_windows, list_mics, get_pending, resolve_pending, open_folder, check_dir, make_dir, pick_dir
         ])
         .setup(|app| {
             let h = app.handle().clone();
@@ -224,7 +288,9 @@ fn main() {
             )?;
             let (tx, rx) = channel();
             let muted = Arc::new(AtomicBool::new(false));
-            app.manage(State { cfg: Mutex::new(cfg), cfg_path, muted: muted.clone(), tx: Mutex::new(tx), status });
+            let recording = Arc::new(AtomicBool::new(false));
+            app.manage(State { cfg: Mutex::new(cfg), cfg_path, muted: muted.clone(), tx: Mutex::new(tx), status, recording: recording.clone() });
+            blink_tray(app.handle().clone(), recording);
 
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
@@ -272,4 +338,27 @@ fn main() {
                 api.prevent_exit();
             }
         });
+}
+
+/// 录制时托盘图标的红点每 0.6 秒亮灭一次；停止后换回原来的图标。
+fn blink_tray(app: AppHandle, recording: Arc<AtomicBool>) {
+    use tauri::image::Image;
+    let on = Image::from_bytes(include_bytes!("../icons/tray-rec-on.png")).expect("tray icon");
+    let off = Image::from_bytes(include_bytes!("../icons/tray-rec-off.png")).expect("tray icon");
+    let idle = app.default_window_icon().map(|i| i.clone().to_owned());
+    std::thread::spawn(move || {
+        let (mut was, mut lit) = (false, false);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let now = recording.load(Relaxed);
+            if !now && !was {
+                continue;
+            }
+            let Some(tray) = app.tray_by_id("main") else { continue };
+            lit = now && !lit;
+            let icon = if !now { idle.clone() } else if lit { Some(on.clone()) } else { Some(off.clone()) };
+            let _ = tray.set_icon(icon);
+            was = now;
+        }
+    });
 }

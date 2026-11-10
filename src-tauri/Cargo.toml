@@ -7,7 +7,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
@@ -28,8 +28,8 @@ windows = { version = "0.62", features = [
 ] }
 libobs-simple = "9.0.0"
 libobs-wrapper = "10.0.1"
-libobs-window-helper = "0.4.1"
 display-info = "0.5"
+tauri-plugin-dialog = "2"
 
 [profile.release]
 strip = true

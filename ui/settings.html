@@ -4,85 +4,100 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Aegis 设置</title>
-  <script src="theme.js"></script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="wrap">
-    <header>
-      <h1>Aegis</h1>
-      <button class="icon-btn" type="button" aria-label="切换亮/暗色" onclick="toggleTheme()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg>
-      </button>
-    </header>
-    <p class="desc">游戏一打开就开始录，游戏关掉时问你要不要留。改动会自动保存。</p>
-
-    <section aria-labelledby="g-games">
-      <div class="head">
-        <h2 id="g-games" class="label">游戏</h2>
-        <p class="desc">按进程名识别。一个游戏可以有多个进程，排在前面的窗口优先录（比如对局优先于客户端）。</p>
+  <div class="titlebar" id="titlebar" data-tauri-drag-region>
+    <div class="wrap bar" data-tauri-drag-region>
+      <span class="brand" data-tauri-drag-region>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" style="pointer-events:none"><rect x="2.75" y="2.75" width="18.5" height="18.5" rx="5"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg>
+        Aegis
+      </span>
+      <div class="controls">
+        <button class="icon-btn" type="button" id="win-min" aria-label="最小化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14"/></svg></button>
+        <button class="icon-btn" type="button" id="win-close" aria-label="关闭到托盘"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
       </div>
-      <div id="games"></div>
-      <div class="row" style="border-bottom:0">
-        <button class="link" type="button" id="add-toggle" aria-expanded="false">从正在运行的程序添加</button>
-      </div>
-      <div class="collapse" id="add-panel"><div><div id="running" style="padding:0 0 .5rem"></div></div></div>
-    </section>
-
-    <section aria-labelledby="g-rec">
-      <div class="head">
-        <h2 id="g-rec" class="label">录制</h2>
-        <p class="desc" id="rec-meta"></p>
-      </div>
-      <div class="row">
-        <div class="grow"><strong>录制范围</strong><p class="meta">只录游戏画面时，被别的窗口挡住也照样录到游戏</p></div>
-        <div class="seg" id="scope"></div>
-      </div>
-      <div class="row">
-        <div class="grow"><strong>分辨率</strong></div>
-        <div class="seg" id="res"></div>
-      </div>
-    </section>
-
-    <section aria-labelledby="g-audio">
-      <div class="head">
-        <h2 id="g-audio" class="label">声音</h2>
-        <p class="desc">游戏声音和麦克风混成一条音轨。录制中可以在托盘菜单里一键静音麦克风。</p>
-      </div>
-      <div class="row">
-        <button class="switch grow" type="button" role="switch" id="mic"><span class="track"></span><span>录麦克风</span></button>
-      </div>
-      <label class="field"><span>麦克风设备</span><select class="input" id="mic-dev"></select></label>
-    </section>
-
-    <section aria-labelledby="g-save">
-      <div class="head">
-        <h2 id="g-save" class="label">保存</h2>
-        <p class="desc">剩余空间不到 5GB 时不开始录；录到不足 1GB 时停下并保存已录部分。</p>
-      </div>
-      <label class="field"><span>保存目录</span>
-        <div class="inline"><input class="input" id="dir" spellcheck="false" /><button class="ghost" type="button" id="open-dir">打开</button></div>
-      </label>
-      <label class="field"><span>默认文件名</span>
-        <input class="input" id="tpl" spellcheck="false" />
-        <span class="meta" id="tpl-preview"></span>
-      </label>
-      <div class="help" style="padding:0 .5rem">
-        <p><code>${game}</code> 游戏名，就是上面列表里的名字</p>
-        <p><code>${time:格式}</code> 开始录制的时间，格式写法同 dayjs，如 <code>YYYY-MM-DD HH:mm:ss</code>；想要别的写法可以直接问 AI</p>
-        <p>文件名里不能用的字符会自动替换，冒号变成全角「：」</p>
-      </div>
-    </section>
-
-    <section aria-labelledby="g-misc">
-      <div class="head"><h2 id="g-misc" class="label">其他</h2></div>
-      <div class="row">
-        <button class="switch grow" type="button" role="switch" id="autostart"><span class="track"></span><span>开机自动启动，常驻托盘</span></button>
-      </div>
-    </section>
-    <p class="toast" id="toast" style="margin-top:2rem"></p>
+    </div>
   </div>
 
+  <main class="scroll" id="scroll">
+    <div class="wrap content">
+      <h1>设置</h1>
+      <p class="desc">游戏一打开就开始录，游戏关掉时问你要不要留。改动会自动保存。</p>
+
+      <section aria-labelledby="g-games">
+        <div class="head">
+          <h2 id="g-games" class="label">游戏</h2>
+          <p class="desc">按进程名识别。一个游戏可以有多个进程，排在前面的窗口优先录（比如对局优先于客户端）。</p>
+        </div>
+        <div id="games"></div>
+        <div class="row" style="border-bottom:0">
+          <button class="link" type="button" id="add-toggle" aria-expanded="false">从正在运行的程序添加</button>
+        </div>
+        <div class="collapse" id="add-panel"><div><div id="running" style="padding-bottom:.5rem"></div></div></div>
+      </section>
+
+      <section aria-labelledby="g-rec">
+        <div class="head">
+          <h2 id="g-rec" class="label">录制</h2>
+          <p class="desc" id="rec-meta"></p>
+        </div>
+        <div class="row">
+          <div class="grow"><strong>录制范围</strong><p class="meta">只录游戏画面时，被别的窗口挡住也照样录到游戏</p></div>
+          <div class="seg" id="scope"></div>
+        </div>
+        <div class="row">
+          <div class="grow"><strong>分辨率</strong></div>
+          <div class="seg" id="res"></div>
+        </div>
+      </section>
+
+      <section aria-labelledby="g-audio">
+        <div class="head">
+          <h2 id="g-audio" class="label">声音</h2>
+          <p class="desc">游戏声音和麦克风混成一条音轨。录制中可以在托盘菜单里一键静音麦克风。</p>
+        </div>
+        <div class="row">
+          <button class="switch grow" type="button" role="switch" id="mic"><span class="track"></span><span>录麦克风</span></button>
+        </div>
+        <label class="field"><span>麦克风设备</span><select class="input" id="mic-dev"></select></label>
+      </section>
+
+      <section aria-labelledby="g-save">
+        <div class="head">
+          <h2 id="g-save" class="label">保存</h2>
+          <p class="desc">剩余空间不到 5GB 时不开始录；录到不足 1GB 时停下并保存已录部分。</p>
+        </div>
+        <div class="field"><label for="dir">保存目录</label>
+          <div class="inline">
+            <input class="input" id="dir" spellcheck="false" aria-describedby="dir-status" />
+            <button class="ghost" type="button" id="pick-dir">选择…</button>
+            <button class="ghost" type="button" id="open-dir">打开</button>
+          </div>
+          <p class="status" id="dir-status" role="status"></p>
+        </div>
+        <label class="field"><span>默认文件名</span>
+          <input class="input" id="tpl" spellcheck="false" />
+          <span class="meta" id="tpl-preview"></span>
+        </label>
+        <div class="help">
+          <p><code>${game}</code> 游戏名，就是上面列表里的名字</p>
+          <p><code>${time:格式}</code> 开始录制的时间，格式写法同 dayjs，如 <code>YYYY-MM-DD HH:mm:ss</code>；想要别的写法可以直接问 AI</p>
+          <p>文件名里不能用的字符会自动替换，冒号变成全角「：」</p>
+        </div>
+      </section>
+
+      <section aria-labelledby="g-misc">
+        <div class="head"><h2 id="g-misc" class="label">其他</h2></div>
+        <div class="row">
+          <button class="switch grow" type="button" role="switch" id="autostart"><span class="track"></span><span>开机自动启动，常驻托盘</span></button>
+        </div>
+      </section>
+      <p class="toast" id="toast" style="margin-top:2rem"></p>
+    </div>
+  </main>
+
+<script src="titlebar.js"></script>
 <script>
 const { invoke } = window.__TAURI__.core
 const $ = (id) => document.getElementById(id)
@@ -119,18 +134,18 @@ const SCOPE_G = [[null, '跟随全局'], ['window', '只录窗口'], ['monitor',
 function renderGames() {
   $('games').replaceChildren(...cfg.games.map((g, i) => {
     const row = document.createElement('div')
-    row.className = 'row'
+    row.className = 'game'
     row.innerHTML = `
-      <button class="switch" type="button" role="switch" aria-label="启用 ${g.name}"><span class="track"></span></button>
-      <div class="grow">
-        <input class="input" value="" aria-label="游戏名" style="padding:.25rem .5rem;width:12rem" />
-        <p class="meta" style="margin-top:.25rem">${g.exes.map(e => e.replace(/</g, '&lt;')).join(' · ')}</p>
-      </div>
+      <button class="switch" type="button" role="switch"><span class="track"></span></button>
+      <input class="inline-edit" aria-label="游戏名" spellcheck="false" />
       <div class="seg"></div>
-      <button class="link danger" type="button">删除</button>`
-    const [s, name, segEl, del] = [row.querySelector('.switch'), row.querySelector('input'), row.querySelector('.seg'), row.querySelector('.danger')]
+      <button class="link danger" type="button">删除</button>
+      <p class="meta exes"></p>`
+    const [s, name, segEl, del, exes] = ['.switch', 'input', '.seg', '.danger', '.exes'].map((q) => row.querySelector(q))
+    s.setAttribute('aria-label', `启用 ${g.name}`)
     name.value = g.name
     name.onchange = () => { g.name = name.value.trim() || g.name; save(); render() }
+    exes.replaceChildren(...g.exes.map((e) => Object.assign(document.createElement('span'), { textContent: e })))
     sw(s, g.enabled, (v) => { g.enabled = v; save() })
     seg(segEl, SCOPE_G, g.scope ?? null, (v) => { g.scope = v; save() })
     del.onclick = () => {
@@ -164,7 +179,46 @@ async function preview() {
   $('tpl-preview').textContent = '预览：' + await invoke('preview_name', { template: cfg.name_template, game })
 }
 
-$('dir').onchange = () => { cfg.out_dir = $('dir').value.trim(); save() }
+// 保存目录：选择器或手动输入（回车 / 点别处）都走 applyDir——先检查能不能用，能用才写进配置，结果一直显示在输入框下面
+function dirStatus(text, action) {
+  const parts = [text]
+  if (action) {
+    const b = Object.assign(document.createElement('button'), { type: 'button', className: 'link', textContent: action.label })
+    b.onclick = action.run
+    parts.push(' · ', b)
+  }
+  $('dir-status').replaceChildren(...parts)
+}
+const gb = (n) => (n >= 100 ? n.toFixed(0) : n.toFixed(1)) + ' GB'
+async function applyDir(path, { create = false, initial = false } = {}) {
+  path = path.trim()
+  if (create) {
+    try { await invoke('make_dir', { path }) } catch (e) { return dirStatus(String(e)) }
+  }
+  const c = await invoke('check_dir', { path })
+  if (c.error) {
+    $('dir').value = cfg.out_dir
+    return dirStatus(`不能用：${c.error}（你填的是 ${path}），仍保存到原来的目录`)
+  }
+  if (!c.exists && initial) {
+    return dirStatus('这个文件夹还不存在，第一次录制时会自动新建', { label: '现在新建', run: () => applyDir(path, { create: true }) })
+  }
+  if (!c.exists) {
+    return dirStatus('这个文件夹还不存在，没有应用', { label: '新建并使用', run: () => applyDir(path, { create: true }) })
+  }
+  const changed = path !== cfg.out_dir
+  cfg.out_dir = path
+  $('dir').value = path
+  if (changed) save()
+  dirStatus(`${changed ? '已应用' : '正在使用'} · 所在磁盘剩余 ${gb(c.free_gb)}${c.free_gb < 5 ? '，不足 5 GB，游戏开始时不会录制' : ''}`)
+}
+$('dir').onchange = () => applyDir($('dir').value)
+$('dir').onkeydown = (e) => { if (e.key === 'Enter') $('dir').blur() }
+$('dir').oninput = () => { if ($('dir').value.trim() !== cfg.out_dir) dirStatus('按回车或点别处应用') }
+$('pick-dir').onclick = async () => {
+  const picked = await invoke('pick_dir', { current: $('dir').value || cfg.out_dir })
+  if (picked) applyDir(picked)
+}
 $('tpl').oninput = () => { cfg.name_template = $('tpl').value; preview(); save() }
 $('open-dir').onclick = () => invoke('open_folder')
 $('mic-dev').onchange = () => { cfg.mic_device = $('mic-dev').value || null; save() }
@@ -199,6 +253,7 @@ $('add-toggle').onclick = async () => {
   $('mic-dev').replaceChildren(new Option('系统默认麦克风', ''), ...mics.map(([id, name]) => new Option(name, id)))
   $('mic-dev').value = cfg.mic_device ?? ''
   render()
+  applyDir(cfg.out_dir, { initial: true })
 })()
 </script>
 </body>

@@ -4,23 +4,36 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>保存录像</title>
-  <script src="theme.js"></script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="wrap" style="padding-top:1.5rem">
+  <div class="titlebar" id="titlebar" data-tauri-drag-region>
+    <div class="wrap bar" data-tauri-drag-region>
+      <span class="brand" data-tauri-drag-region>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" style="pointer-events:none"><rect x="2.75" y="2.75" width="18.5" height="18.5" rx="5"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg>
+        Aegis
+      </span>
+      <div class="controls">
+        <button class="icon-btn" type="button" id="win-close" aria-label="稍后处理"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+    </div>
+  </div>
+  <main class="scroll" id="scroll">
+  <div class="wrap content" style="padding-top:.5rem;padding-bottom:1.5rem">
     <h1 style="font-size:1.125rem">录完了，留下吗？</h1>
     <p class="desc" id="count"></p>
     <label class="field" style="padding:1rem 0 .25rem"><span>文件名</span>
       <input class="input" id="name" spellcheck="false" />
     </label>
-    <p class="meta" id="path"></p>
+    <p class="meta" id="path" style="word-break:break-all"></p>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:1.25rem">
       <button class="link danger" type="button" id="discard">不保存</button>
       <button class="btn" type="button" id="save">保存</button>
     </div>
     <p class="toast" id="toast" style="margin-top:.75rem"></p>
   </div>
+  </main>
+<script src="titlebar.js"></script>
 <script>
 const { invoke } = window.__TAURI__.core
 const $ = (id) => document.getElementById(id)

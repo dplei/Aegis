@@ -149,3 +149,20 @@ pub fn default_mic() -> Option<String> {
     let _ = initialize_mta();
     DeviceEnumerator::new().and_then(|e| e.get_default_device(Direction::Capture)).and_then(|d| d.get_id()).ok()
 }
+
+/// OBS 的窗口标识 "标题:类名:exe"（# 和 : 转义成 #22、#3A）。只读窗口本身和进程快照，不打开目标进程。
+pub fn obs_window_id(hwnd: isize) -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let h = HWND(hwnd as _);
+    let (mut t, mut c) = ([0u16; 256], [0u16; 256]); // 缓冲全 0，from_wide 读到第一个 0 为止
+    unsafe {
+        GetWindowTextW(h, &mut t);
+        GetClassNameW(h, &mut c);
+    }
+    let (title, class) = (from_wide(&t), from_wide(&c));
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+    let exe = processes().into_iter().find(|p| p.0 == pid)?.1;
+    let enc = |s: &str| s.replace('#', "#22").replace(':', "#3A");
+    Some(format!("{}:{}:{}", enc(&title), enc(&class), enc(&exe)))
+}

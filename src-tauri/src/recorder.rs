@@ -24,7 +24,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tauri::AppHandle;
-use windows::Win32::Foundation::HWND;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -119,16 +118,18 @@ impl Obs {
         Ok(Obs { ctx, scene, canvas })
     }
 
-    fn window_info(hwnd: isize) -> Res<libobs_window_helper::WindowInfo> {
-        Ok(libobs_window_helper::get_window_info(HWND(hwnd as _))?)
+    /// OBS 认窗口用的 "标题:类名:exe" 字符串。自己拼，不用 libobs_window_helper::get_window_info：
+    /// 它要读目标进程内存拿路径和命令行，LOL 这类受反作弊保护的进程会拒绝访问。
+    fn window_id(hwnd: isize) -> Res<String> {
+        Ok(win::obs_window_id(hwnd).ok_or("读不到游戏窗口的标题或进程名")?)
     }
 
     /// 让捕获对准 target；同类目标只改设置，不重建源。
     fn aim(&mut self, cur: &mut Option<(Target, Capture)>, target: Target, hwnd: isize) -> Res<()> {
-        let info = Self::window_info(hwnd)?;
+        let id = Self::window_id(hwnd)?;
         match (cur.as_mut(), target) {
             (Some((t, Capture::Win(item))), Target::Win(_)) => {
-                item.inner_source_mut().create_updater()?.set_window(&info).update()?;
+                item.inner_source_mut().create_updater()?.set_window_raw(id.as_str()).update()?;
                 item.fit_source_to_screen()?;
                 *t = target;
             }
@@ -137,7 +138,7 @@ impl Obs {
                 item.inner_source_mut().create_updater()?.set_monitor(&mon).update()?;
                 item.fit_source_to_screen()?;
                 let mut d = ObsData::new(self.ctx.runtime().clone())?;
-                d.bulk_update().set_string("window", info.obs_id.as_str()).apply()?;
+                d.bulk_update().set_string("window", id.as_str()).apply()?;
                 audio.inner_source().update_settings(d)?;
                 *t = target;
             }
@@ -149,7 +150,7 @@ impl Obs {
                             .ctx
                             .source_builder::<WindowCaptureSourceBuilder, _>("game")?
                             .set_capture_method(ObsWindowCaptureMethod::MethodWgc)
-                            .set_window(&info)
+                            .set_window_raw(id.as_str())
                             .set_client_area(true)
                             .set_capture_audio(true)?
                             .add_to_scene(&mut self.scene)?;
@@ -163,7 +164,7 @@ impl Obs {
                             .set_monitor(&monitor(m)?)
                             .add_to_scene(&mut self.scene)?;
                         item.fit_source_to_screen()?;
-                        let audio = self.add_raw("wasapi_process_output_capture", "game-audio", &[("window", &info.obs_id)])?;
+                        let audio = self.add_raw("wasapi_process_output_capture", "game-audio", &[("window", &id)])?;
                         Capture::Mon(item, audio)
                     }
                 };
