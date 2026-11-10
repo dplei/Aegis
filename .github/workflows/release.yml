@@ -1,13 +1,20 @@
-# 推一个 v* tag（如 v0.1.0）就打包 Windows 安装包并发布到 GitHub Release。
-# tag 必须和 src-tauri/tauri.conf.json 里的 version 一致，否则直接失败。
+# 在 main 上手动触发：Actions 页点 Run workflow，或 `gh workflow run release.yml`。
+# 版本号读 src-tauri/tauri.conf.json；workflow 自己打 v<version> tag 并发 Release，tag 已存在就直接失败。
+# 为什么不用推 tag 触发：Actions 缓存按 ref 隔离，tag 名下存的缓存下次发版读不到；在 main 上跑，缓存每次都能复用。
 name: release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 发布到 Release（不勾就只构建，用来试流程、预热缓存）
+        type: boolean
+        default: true
 
 permissions:
   contents: write
+
+concurrency: release
 
 jobs:
   windows:
@@ -15,11 +22,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 检查 tag 和版本号一致
+      - name: 读版本号
+        id: ver
         shell: pwsh
         run: |
+          if ("${{ github.ref_name }}" -ne "main") { throw "只能在 main 上发版，当前是 ${{ github.ref_name }}" }
           $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          if ("v$v" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} 和 tauri.conf.json 的 version $v 不一致" }
+          $obs = (Select-String -Path src-tauri/Cargo.toml -Pattern '^libobs-version = "(.+)"').Matches[0].Groups[1].Value
+          gh release view "v$v" 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0 -and "${{ inputs.publish }}" -eq "true") { throw "v$v 已经发布过了，先改 tauri.conf.json 的 version" }
+          $global:LASTEXITCODE = 0 # 没找到时 gh 返回 1，不清零的话 pwsh 步骤会按它判失败
+          "tag=v$v" >> $env:GITHUB_OUTPUT
+          "obs=$obs" >> $env:GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -34,7 +50,16 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # OBS 运行时只跟 libobs-version 有关：命中缓存就跳过编译 cargo-obs-build 和下载 OBS
+      - name: 缓存 OBS 运行时
+        id: obs-cache
+        uses: actions/cache@v4
+        with:
+          path: obs-runtime
+          key: obs-runtime-${{ steps.ver.outputs.obs }}-v1
+
       - name: 准备 OBS 运行时
+        if: steps.obs-cache.outputs.cache-hit != 'true'
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # cargo-obs-build 下载 OBS 时避开 GitHub 限流
@@ -49,10 +74,12 @@ jobs:
       - run: pnpm tauri build
 
       - name: 发布到 Release
+        if: inputs.publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
           $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          gh release create "${{ github.ref_name }}" $exe.FullName --title "Aegis ${{ github.ref_name }}" --generate-notes `
+          gh release create $tag $exe.FullName --target "${{ github.sha }}" --title "Aegis $tag" --generate-notes `
             --notes "Windows 10/11 + NVIDIA 显卡。Code signing policy：https://github.com/${{ github.repository }}#code-signing-policy"

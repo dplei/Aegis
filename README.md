@@ -76,7 +76,13 @@ pnpm tauri build    # 安装包在 src-tauri/target/release/bundle/nsis/
 
 `obs-runtime/` 会作为资源装在 exe 旁边。打包前建议删掉 `obs-runtime/obs-plugins/64bit/rtmp-services.dll` 和 `obs-runtime/data/obs-plugins/rtmp-services/`，这个插件只给直播用，每次启动都会联网更新平台列表。
 
-发版：改好 `src-tauri/tauri.conf.json` 里的 `version` 并提交，推一个同名的 tag，比如 `v0.1.1`。[release.yml](.github/workflows/release.yml) 会在 Windows 上打包，并把安装包发到 Releases；tag 和 `version` 对不上时会直接失败。
+发版：改好 `src-tauri/tauri.conf.json` 里的 `version`，提交并推到 main，然后在 Actions 页运行 release，或者：
+
+```bash
+gh workflow run release.yml
+```
+
+[release.yml](.github/workflows/release.yml) 会在 Windows 上打包，自己打 `v<version>` 的 tag，把安装包发到 Releases；这个版本已经发过时会直接失败。OBS 运行时的版本写在 `src-tauri/Cargo.toml` 的 `libobs-version`，按它缓存，平时发版不重新下载。
 
 代码不多，五个文件：
 
