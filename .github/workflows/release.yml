@@ -1,5 +1,6 @@
-# 在 main 上手动触发：Actions 页点 Run workflow，或 `gh workflow run release.yml`。
-# 版本号读 src-tauri/tauri.conf.json；workflow 自己打 v<version> tag 并发 Release，tag 已存在就直接失败。
+# 在 main 上手动触发：Actions 页点 Run workflow，或 `gh workflow run release.yml -f bump=patch`。
+# bump 选 patch/minor/major 时，CI 自己改 tauri.conf.json、Cargo.toml、Cargo.lock 的版本号，构建成功后提交到 main 再发版（发完记得本地 git pull）；
+# 选 none 就按文件里现有的版本号发。workflow 自己打 v<version> tag 并发 Release，tag 已存在就直接失败。
 # 为什么不用推 tag 触发：Actions 缓存按 ref 隔离，tag 名下存的缓存下次发版读不到；在 main 上跑，缓存每次都能复用。
 # secret：QINIU_AK / QINIU_SK（七牛，与 loadout、poro-auth 同一账号），mirror job 用来把安装包镜像到国内 CDN。
 name: release
@@ -7,6 +8,11 @@ name: release
 on:
   workflow_dispatch:
     inputs:
+      bump:
+        description: 升哪一位版本号（none = 用现有版本号）
+        type: choice
+        options: [patch, minor, major, none]
+        default: patch
       publish:
         description: 发布到 Release（不勾就只构建，用来试流程、预热缓存）
         type: boolean
@@ -24,6 +30,22 @@ jobs:
       tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 升版本号
+        if: inputs.bump != 'none'
+        shell: pwsh
+        run: |
+          $old = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $p = [int[]]$old.Split('.')
+          switch ("${{ inputs.bump }}") { 'major' { $p = $p[0] + 1, 0, 0 } 'minor' { $p = $p[0], ($p[1] + 1), 0 } 'patch' { $p[2]++ } }
+          $new = $p -join '.'
+          # 三处都只替换第一处匹配，别碰到依赖的版本号
+          $edit = { param($f, $pat, $rep) $t = [IO.File]::ReadAllText($f); $t2 = ([regex]$pat).Replace($t, $rep, 1); if ($t2 -eq $t) { throw "$f 里没找到版本号" }; [IO.File]::WriteAllText($f, $t2) }
+          & $edit src-tauri/tauri.conf.json "`"version`": `"$([regex]::Escape($old))`"" "`"version`": `"$new`""
+          & $edit src-tauri/Cargo.toml "(?m)^version = `"$([regex]::Escape($old))`"" "version = `"$new`""
+          & $edit src-tauri/Cargo.lock "name = `"aegis`"\r?\nversion = `"$([regex]::Escape($old))`"" "name = `"aegis`"`nversion = `"$new`""
+          git diff --stat
+          "$old → $new"
 
       - name: 读版本号
         id: ver
@@ -83,8 +105,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ steps.ver.outputs.tag }}"
+          if ("${{ inputs.bump }}" -ne "none") {
+            # 构建成功才提交版本号：构建失败不会在 main 上留下没发出去的版本
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -qam "发布 $tag"
+            git push origin HEAD:main
+          }
+          $sha = git rev-parse HEAD
           $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
-          gh release create $tag $exe.FullName --target "${{ github.sha }}" --title "Aegis $tag" --generate-notes `
+          gh release create $tag $exe.FullName --target $sha --title "Aegis $tag" --generate-notes `
             --notes "Windows 10/11 + NVIDIA 显卡。国内下载：https://cdn.suibianwanwan.fun/aegis/aegis-setup.exe（七牛 CDN，始终是最新版）。Code signing policy：https://github.com/${{ github.repository }}#code-signing-policy"
 
   # 镜像到七牛（国内下载），照搬 dplei/loadout 的 mirror job：同一 bucket / CDN，前缀 aegis
