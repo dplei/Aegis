@@ -24,11 +24,12 @@
     <div class="wrap content">
       <h1>设置</h1>
       <p class="desc">游戏一打开就开始录，游戏关掉时问你要不要留。改动会自动保存。</p>
+      <p class="status" id="rec-banner" role="status" hidden></p>
 
       <section aria-labelledby="g-games">
         <div class="head">
           <h2 id="g-games" class="label">游戏</h2>
-          <p class="desc">按进程名识别。一个游戏可以有多个进程，排在前面的窗口优先录（比如对局优先于客户端）。</p>
+          <p class="desc">按进程名识别。同时开着几个游戏时，录排在前面的，按住左侧把手拖动调整顺序。一个游戏可以有多个进程，排在前面的窗口优先录（比如对局优先于客户端）。</p>
         </div>
         <div id="games"></div>
         <div class="row" style="border-bottom:0">
@@ -90,7 +91,12 @@
       <section aria-labelledby="g-misc">
         <div class="head"><h2 id="g-misc" class="label">其他</h2></div>
         <div class="row">
-          <button class="switch grow" type="button" role="switch" id="autostart"><span class="track"></span><span>开机自动启动，常驻托盘</span></button>
+          <button class="switch grow" type="button" role="switch" id="autostart" aria-describedby="autostart-meta"><span class="track"></span><span>开机自动启动，常驻托盘</span></button>
+        </div>
+        <p class="meta" id="autostart-meta"></p>
+        <div class="row">
+          <div class="grow"><strong>导出日志</strong><p class="meta">出问题时导出一个 zip 到桌面，发给开发者排查</p></div>
+          <button class="ghost" type="button" id="export-logs">导出</button>
         </div>
       </section>
       <p class="toast" id="toast" style="margin-top:2rem"></p>
@@ -112,7 +118,12 @@ function toast(msg) {
 function save() {
   clearTimeout(saveTimer)
   saveTimer = setTimeout(async () => {
-    try { await invoke('set_config', { cfg }); toast('已保存') } catch (e) { toast('保存失败：' + e) }
+    try { await invoke('set_config', { cfg }); toast('已保存') } catch (e) {
+      toast(String(e))
+      cfg.autostart = (await invoke('get_config')).autostart // 自启没设成时后端已把开关记回实际状态
+      render()
+    }
+    autostartMeta()
   }, 300)
 }
 function seg(el, options, value, onPick) {
@@ -130,18 +141,57 @@ function sw(el, on, onToggle) {
   el.onclick = () => { onToggle(!on); render() }
 }
 const SCOPE_G = [[null, '跟随全局'], ['window', '只录窗口'], ['monitor', '录全屏']]
+let dragFrom = null
+function clearDrop() { document.querySelectorAll('.drop-before, .drop-after').forEach((r) => r.classList.remove('drop-before', 'drop-after')) }
+function moveGame(from, to) {
+  if (from === to) return render()
+  cfg.games.splice(to, 0, ...cfg.games.splice(from, 1))
+  save(); render()
+}
+function recBanner(game) {
+  $('rec-banner').hidden = !game
+  $('rec-banner').textContent = game ? `正在录制 ${game}，修改将从下一次录制生效` : ''
+}
+window.__TAURI__.event.listen('recording', (e) => recBanner(e.payload))
+invoke('recording_game').then(recBanner)
 
 function renderGames() {
   $('games').replaceChildren(...cfg.games.map((g, i) => {
     const row = document.createElement('div')
     row.className = 'game'
     row.innerHTML = `
+      <button class="grip" type="button" draggable="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg></button>
       <button class="switch" type="button" role="switch"><span class="track"></span></button>
       <input class="inline-edit" aria-label="游戏名" spellcheck="false" />
       <div class="seg"></div>
       <button class="link danger" type="button">删除</button>
       <p class="meta exes"></p>`
-    const [s, name, segEl, del, exes] = ['.switch', 'input', '.seg', '.danger', '.exes'].map((q) => row.querySelector(q))
+    const [grip, s, name, segEl, del, exes] = ['.grip', '.switch', 'input', '.seg', '.danger', '.exes'].map((q) => row.querySelector(q))
+    grip.setAttribute('aria-label', `调整 ${g.name} 的顺序：第 ${i + 1} 个，共 ${cfg.games.length} 个，用上下方向键移动`)
+    grip.onkeydown = (e) => {
+      const to = i + (e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0)
+      if (to === i || to < 0 || to >= cfg.games.length) return
+      e.preventDefault()
+      moveGame(i, to)
+      $('games').children[to].querySelector('.grip').focus()
+    }
+    grip.ondragstart = (e) => { dragFrom = i; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setDragImage(row, 16, 16) }
+    grip.ondragend = () => { dragFrom = null; clearDrop() }
+    row.ondragover = (e) => {
+      if (dragFrom === null) return
+      e.preventDefault()
+      const after = e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2
+      clearDrop()
+      row.classList.add(after ? 'drop-after' : 'drop-before')
+    }
+    row.ondrop = (e) => {
+      if (dragFrom === null) return
+      e.preventDefault()
+      const after = row.classList.contains('drop-after')
+      let to = i + (after ? 1 : 0)
+      if (dragFrom < to) to--
+      moveGame(dragFrom, to)
+    }
     s.setAttribute('aria-label', `启用 ${g.name}`)
     name.value = g.name
     name.onchange = () => { g.name = name.value.trim() || g.name; save(); render() }
@@ -221,6 +271,18 @@ $('pick-dir').onclick = async () => {
 }
 $('tpl').oninput = () => { cfg.name_template = $('tpl').value; preview(); save() }
 $('open-dir').onclick = () => invoke('open_folder')
+$('export-logs').onclick = async () => {
+  $('export-logs').disabled = true
+  try { toast('已导出：' + await invoke('export_logs')) } catch (e) { toast(String(e)) }
+  $('export-logs').disabled = false
+}
+async function autostartMeta() {
+  const m = await invoke('autostart_status')
+  $('autostart-meta').textContent = !cfg.autostart ? ''
+    : m === 'registry' ? '已通过注册表启动项生效'
+    : m === 'startup_folder' ? '注册表启动项被拦截，已改用「启动」文件夹的快捷方式'
+    : '当前未生效，可能被任务管理器禁用或被安全软件拦截'
+}
 $('mic-dev').onchange = () => { cfg.mic_device = $('mic-dev').value || null; save() }
 
 $('add-toggle').onclick = async () => {
@@ -253,6 +315,8 @@ $('add-toggle').onclick = async () => {
   $('mic-dev').replaceChildren(new Option('系统默认麦克风', ''), ...mics.map(([id, name]) => new Option(name, id)))
   $('mic-dev').value = cfg.mic_device ?? ''
   render()
+  reveal()
+  autostartMeta()
   applyDir(cfg.out_dir, { initial: true })
 })()
 </script>

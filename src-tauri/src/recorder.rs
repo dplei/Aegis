@@ -16,6 +16,7 @@ use libobs_wrapper::data::{ObsData, ObsObjectUpdater};
 use libobs_wrapper::scenes::{ObsSceneRef, SceneItemTrait};
 use libobs_wrapper::sources::{ObsSourceAudioExt, ObsSourceBuilder, ObsSourceRef};
 use libobs_wrapper::utils::{ObsPath, StartupInfo};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -53,8 +54,11 @@ enum Capture {
     ),
 }
 
+/// 一次录制。设置在开始时定下，录制中改设置从下一次录制生效：
+/// 录制范围存在这里；保存目录就是 dir 所在的输出目录；文件名模板写在 dir/tpl.txt。
 struct Session {
     game: Game,
+    scope: Scope,
     start: DateTime<Local>,
     dir: PathBuf,
     output: ObsOutputRef,
@@ -233,19 +237,18 @@ fn monitor(hmon: isize) -> Res<display_info::DisplayInfo> {
 }
 
 impl Session {
-    fn tick(&mut self, obs: &mut Obs, cfg: &Config, pids: &[(u32, String)], muted: bool) {
+    fn tick(&mut self, obs: &mut Obs, pids: &[(u32, String)], muted: bool) {
         if let Some(mic) = &self.mic {
             if self.mic_muted != muted && mic.inner_source().set_muted(muted).is_ok() {
                 self.mic_muted = muted;
             }
         }
-        let scope = self.game.scope.unwrap_or(cfg.scope);
-        let Some((target, hwnd)) = pick(&self.game, scope, pids) else { return };
+        let Some((target, hwnd)) = pick(&self.game, self.scope, pids) else { return };
         if self.cap.as_ref().is_some_and(|(t, _)| *t == target) {
             return;
         }
         if let Err(e) = obs.aim(&mut self.cap, target, hwnd) {
-            eprintln!("切换捕获目标失败：{e}");
+            log::warn!("切换捕获目标失败：{e}");
         }
     }
 
@@ -268,8 +271,10 @@ pub fn run(app: AppHandle, rx: Receiver<Cmd>, muted: Arc<AtomicBool>) {
             return;
         }
     };
+    log::info!("录制内核已启动");
     let mut sess: Option<Session> = None;
     let mut suppressed: Option<String> = None; // 手动结束/跳过/空间不足后，等游戏退出前不再自动录
+    let mut noticed: HashSet<String> = HashSet::new(); // 录制中已经提醒过「也开着」的其他游戏
     loop {
         thread::sleep(Duration::from_secs(1));
         let cfg = crate::config_snapshot(&app);
@@ -283,23 +288,35 @@ pub fn run(app: AppHandle, rx: Receiver<Cmd>, muted: Arc<AtomicBool>) {
                 suppressed = Some(s.game.name.clone());
             } else if pids.is_empty() {
                 end = Some(true);
-            } else if win::disk_free(&cfg.out_dir) < MIN_FREE_RUN {
+            } else if win::disk_free(&s.dir) < MIN_FREE_RUN {
                 crate::notify(&app, "硬盘空间不足 1GB，已停止录制并保存已录部分");
                 suppressed = Some(s.game.name.clone());
                 end = Some(true);
             }
+            // 录着 A 时列表里的 B 也开着：每次 B 启动提醒一次，改录要用户自己在托盘里结束 A
+            for g in cfg.games.iter().filter(|g| g.enabled && g.name != s.game.name && Some(&g.name) != suppressed.as_ref()) {
+                if game_pids(g, &procs).is_empty() {
+                    noticed.remove(&g.name);
+                } else if noticed.insert(g.name.clone()) {
+                    log::info!("{} 也开着，继续录 {}", g.name, s.game.name);
+                    crate::toast(&app, &format!("{} 也开着，正在录 {}。想改录 {}：托盘 → 结束录制并保存", g.name, s.game.name, g.name));
+                }
+            }
             match end {
-                None => s.tick(&mut obs, &cfg, &pids, muted.load(Relaxed)),
+                None => s.tick(&mut obs, &pids, muted.load(Relaxed)),
                 Some(keep) => {
                     let s = sess.take().unwrap();
                     let (game, start) = (s.game.name.clone(), s.start);
                     let dir = s.end(&mut obs);
                     crate::set_status(&app, None);
+                    log::info!("结束录制 {game}：{}", if keep { "保存" } else { "跳过" });
                     if keep {
                         finalize(&app, &dir, &game, start);
                     } else {
                         let _ = fs::remove_dir_all(&dir);
                     }
+                    crate::set_recording_dir(&app, None);
+                    noticed.clear();
                 }
             }
             continue;
@@ -332,6 +349,7 @@ pub fn run(app: AppHandle, rx: Receiver<Cmd>, muted: Arc<AtomicBool>) {
         let dir = tmp_root(&cfg).join(start.timestamp().to_string());
         let _ = fs::create_dir_all(&dir);
         let _ = fs::write(dir.join("game.txt"), &game.name);
+        let _ = fs::write(dir.join("tpl.txt"), &cfg.name_template);
         let mut cap = None;
         let began = obs.aim(&mut cap, target, hwnd).and_then(|_| obs.begin(&cfg, game, hwnd, &dir));
         let (output, mic) = match began {
@@ -352,11 +370,15 @@ pub fn run(app: AppHandle, rx: Receiver<Cmd>, muted: Arc<AtomicBool>) {
             continue;
         }
         crate::set_status(&app, Some(&game.name));
-        sess = Some(Session { game: game.clone(), start, dir, output, cap, mic, mic_muted: false });
+        crate::set_recording_dir(&app, Some(dir.clone()));
+        log::info!("开始录制 {}（{:?}，进程 {:?}）", game.name, scope, game_pids(game, &procs));
+        crate::toast(&app, &format!("开始录制 {}", game.name));
+        sess = Some(Session { game: game.clone(), scope, start, dir, output, cap, mic, mic_muted: false });
     }
 }
 
 /// 把会话目录里的录像按默认名移到输出目录，记为待命名。
+/// 输出目录和模板都按开始录制时的：dir 是 <输出目录>/.aegis-tmp/<时间戳>，同盘改名，不会跨盘复制。
 pub fn finalize(app: &AppHandle, dir: &Path, game: &str, start: DateTime<Local>) {
     let rec = dir.join(REC_FILE);
     if fs::metadata(&rec).map(|m| m.len()).unwrap_or(0) < 1024 {
@@ -364,19 +386,26 @@ pub fn finalize(app: &AppHandle, dir: &Path, game: &str, start: DateTime<Local>)
         return;
     }
     let cfg = crate::config_snapshot(app);
-    let out = unique_path(&cfg.out_dir, &render_name(&cfg.name_template, game, start));
-    if fs::rename(&rec, &out).is_ok() {
-        let _ = fs::remove_dir_all(dir);
-        crate::add_pending(app, out);
-    } else {
+    let out_dir = dir.parent().and_then(Path::parent).map_or(cfg.out_dir.clone(), Path::to_path_buf);
+    let tpl = fs::read_to_string(dir.join("tpl.txt")).unwrap_or(cfg.name_template);
+    let out = unique_path(&out_dir, &render_name(&tpl, game, start));
+    if let Err(e) = fs::rename(&rec, &out) {
+        log::error!("移动录像失败 {} -> {}：{e}", rec.display(), out.display());
         crate::notify(app, &format!("保存录像失败，原始文件在 {}", rec.display()));
+    } else {
+        let _ = fs::remove_dir_all(dir);
+        log::info!("录像已保存：{}", out.display());
+        crate::add_pending(app, out);
     }
 }
 
-/// 启动时把上次异常退出留下的会话目录收尾。
+/// 启动时把上次异常退出留下的会话目录收尾：当前输出目录，加上录制中途被改掉的那个旧目录。
 pub fn recover(app: &AppHandle) {
-    let root = tmp_root(&crate::config_snapshot(app));
-    for e in fs::read_dir(root).into_iter().flatten().flatten() {
+    let cfg = crate::config_snapshot(app);
+    let mut roots = vec![tmp_root(&cfg)];
+    roots.extend(cfg.recording.as_deref().and_then(Path::parent).map(Path::to_path_buf).filter(|r| r != &roots[0]));
+    crate::set_recording_dir(app, None);
+    for e in roots.iter().flat_map(fs::read_dir).flatten().flatten() {
         let dir = e.path();
         let ts = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<i64>().ok());
         if let Some(start) = ts.and_then(|t| Local.timestamp_opt(t, 0).single()) {

@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/dplei/Aegis/releases/latest">下载</a> ·
+  <a href="https://cdn.suibianwanwan.fun/aegis/aegis-setup.exe">国内下载</a> ·
   <a href="#开始">开始</a> ·
   <a href="#从源码构建">从源码构建</a>
 </p>
@@ -38,6 +39,7 @@ Aegis，是神话里雅典娜那面盾的名字。
 ## 开始
 
 1. 从 [Releases](https://github.com/dplei/Aegis/releases/latest) 下载安装包，装好。
+   国内下载：[aegis-setup.exe](https://cdn.suibianwanwan.fun/aegis/aegis-setup.exe)（七牛 CDN，始终是最新版）。
    签名还在申请中，Windows 可能弹出“已保护你的电脑”，点“更多信息”，再点“仍要运行”。
 2. 打开 Aegis，在设置里勾上要录的游戏，选好保存目录。
 3. 去玩吧。
@@ -82,16 +84,17 @@ pnpm tauri build    # 安装包在 src-tauri/target/release/bundle/nsis/
 gh workflow run release.yml
 ```
 
-[release.yml](.github/workflows/release.yml) 会在 Windows 上打包，自己打 `v<version>` 的 tag，把安装包发到 Releases；这个版本已经发过时会直接失败。OBS 运行时的版本写在 `src-tauri/Cargo.toml` 的 `libobs-version`，按它缓存，平时发版不重新下载。
+[release.yml](.github/workflows/release.yml) 会在 Windows 上打包，自己打 `v<version>` 的 tag，把安装包发到 Releases，再镜像到七牛 CDN 供国内下载（需要仓库 secrets `QINIU_AK` / `QINIU_SK`）；这个版本已经发过时会直接失败。OBS 运行时的版本写在 `src-tauri/Cargo.toml` 的 `libobs-version`，按它缓存，平时发版不重新下载。
 
-代码不多，五个文件：
+代码不多，六个文件：
 
 | 文件 | 做什么 |
 |---|---|
 | `src-tauri/src/recorder.rs` | 盯着进程，开始、切换、结束录制 |
 | `src-tauri/src/config.rs` | 配置、游戏预设、文件名模板 |
-| `src-tauri/src/win.rs` | 进程、窗口、显示器、磁盘、回收站 |
-| `src-tauri/src/main.rs` | 托盘、窗口、前端命令 |
+| `src-tauri/src/win.rs` | 进程、窗口、显示器、磁盘、回收站、启动文件夹快捷方式 |
+| `src-tauri/src/main.rs` | 托盘、窗口、前端命令、开机自启、日志 |
+| `src-tauri/src/export-logs.ps1` | 导出日志时打包日志、配置和系统信息 |
 | `ui/` | 设置页和保存弹窗，原生 HTML |
 
 ## Code signing policy
@@ -113,8 +116,8 @@ Only installers built automatically from this repository's source by GitHub Acti
 
 This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
-Aegis works fully offline: no uploads, no telemetry, no update checks. Recordings are stored only in the save folder you choose, and settings only in `%APPDATA%\app.aegis.recorder`. The OBS `rtmp-services` plugin, the only OBS component that contacts the network (to update its streaming service list), is removed from release builds.
-（Aegis 不联网：不上传、不统计、不检查更新。录像只存在你设置的保存目录，配置只存在 `%APPDATA%\app.aegis.recorder`。打包时去掉了 OBS 里唯一会联网的直播插件 `rtmp-services`。）
+Aegis works fully offline: no uploads, no telemetry, no update checks. Recordings are stored only in the save folder you choose, settings only in `%APPDATA%\app.aegis.recorder`, and logs only in `%LOCALAPPDATA%\app.aegis.recorder\logs`; "Export logs" only writes a zip to your desktop for you to send yourself. The OBS `rtmp-services` plugin, the only OBS component that contacts the network (to update its streaming service list), is removed from release builds.
+（Aegis 不联网：不上传、不统计、不检查更新。录像只存在你设置的保存目录，配置只存在 `%APPDATA%\app.aegis.recorder`，日志只存在 `%LOCALAPPDATA%\app.aegis.recorder\logs`；「导出日志」只是在桌面生成一个 zip，发不发、发给谁由你决定。打包时去掉了 OBS 里唯一会联网的直播插件 `rtmp-services`。）
 
 ## License
 

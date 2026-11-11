@@ -35,6 +35,9 @@ pub struct Config {
     /// 已按默认名保存、还等着用户确认命名的视频
     #[serde(default)]
     pub pending: Vec<PathBuf>,
+    /// 正在录的会话目录；异常退出后靠它找回录制中途被改掉的旧保存目录里的录像
+    #[serde(default)]
+    pub recording: Option<PathBuf>,
 }
 
 pub const DEFAULT_TEMPLATE: &str = "${game}_${time:YYYY-MM-DD HH:mm:ss}";
@@ -65,6 +68,7 @@ impl Config {
             mic_device: None,
             autostart: true,
             pending: vec![],
+            recording: None,
         }
     }
 

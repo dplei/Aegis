@@ -48,6 +48,7 @@ async function load() {
   $('path').textContent = cur
   $('count').textContent = list.length > 1 ? `还有 ${list.length - 1} 段等着处理` : '已经按默认名存好了，不处理也不会丢。'
   $('discard').classList.remove('arm'); $('discard').textContent = '不保存'
+  await reveal()
   $('name').focus(); $('name').select()
 }
 async function resolve(name) {

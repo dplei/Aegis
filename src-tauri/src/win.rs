@@ -113,6 +113,45 @@ pub fn recycle(path: &Path) -> bool {
     unsafe { SHFileOperationW(&mut op) == 0 }
 }
 
+/// 「启动」文件夹里的 Aegis.lnk：注册表 Run 被安全软件拦截时的开机自启兜底。
+pub fn startup_lnk() -> std::path::PathBuf {
+    let appdata = std::env::var_os("APPDATA").unwrap_or_default();
+    Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs\Startup\Aegis.lnk")
+}
+
+/// HKCU Run 下有没有这个值（不管任务管理器里是否禁用）
+pub fn run_value_exists(name: &str) -> bool {
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_ANY};
+    let name = wide(name);
+    unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, windows::core::w!(r"Software\Microsoft\Windows\CurrentVersion\Run"), PCWSTR(name.as_ptr()), RRF_RT_ANY, None, None, None).is_ok()
+    }
+}
+
+/// on = 建（或覆盖）指向当前 exe 的快捷方式，带 args；off = 删掉。
+pub fn set_startup_lnk(on: bool, args: &str) -> Result<(), String> {
+    let lnk = startup_lnk();
+    if !on {
+        return match std::fs::remove_file(&lnk) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        };
+    }
+    use windows::core::Interface;
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let (exe_w, args_w, lnk_w) = (wide(&exe.to_string_lossy()), wide(args), wide(&lnk.to_string_lossy()));
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); // 已初始化过（含不同模式）都无妨
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
+        link.SetPath(PCWSTR(exe_w.as_ptr())).map_err(|e| e.to_string())?;
+        link.SetArguments(PCWSTR(args_w.as_ptr())).map_err(|e| e.to_string())?;
+        let file: IPersistFile = link.cast().map_err(|e| e.to_string())?;
+        file.Save(PCWSTR(lnk_w.as_ptr()), true).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

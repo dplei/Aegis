@@ -1,6 +1,7 @@
 # 在 main 上手动触发：Actions 页点 Run workflow，或 `gh workflow run release.yml`。
 # 版本号读 src-tauri/tauri.conf.json；workflow 自己打 v<version> tag 并发 Release，tag 已存在就直接失败。
 # 为什么不用推 tag 触发：Actions 缓存按 ref 隔离，tag 名下存的缓存下次发版读不到；在 main 上跑，缓存每次都能复用。
+# secret：QINIU_AK / QINIU_SK（七牛，与 loadout、poro-auth 同一账号），mirror job 用来把安装包镜像到国内 CDN。
 name: release
 
 on:
@@ -19,6 +20,8 @@ concurrency: release
 jobs:
   windows:
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -82,4 +85,40 @@ jobs:
           $tag = "${{ steps.ver.outputs.tag }}"
           $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           gh release create $tag $exe.FullName --target "${{ github.sha }}" --title "Aegis $tag" --generate-notes `
-            --notes "Windows 10/11 + NVIDIA 显卡。Code signing policy：https://github.com/${{ github.repository }}#code-signing-policy"
+            --notes "Windows 10/11 + NVIDIA 显卡。国内下载：https://cdn.suibianwanwan.fun/aegis/aegis-setup.exe（七牛 CDN，始终是最新版）。Code signing policy：https://github.com/${{ github.repository }}#code-signing-policy"
+
+  # 镜像到七牛（国内下载），照搬 dplei/loadout 的 mirror job：同一 bucket / CDN，前缀 aegis
+  mirror:
+    needs: windows
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # 跨境上传偶尔卡住
+    env:
+      TAG: ${{ needs.windows.outputs.tag }}
+      BUCKET: dplay-release
+      PREFIX: aegis
+      CDN: https://cdn.suibianwanwan.fun
+    steps:
+      - name: 检查 QINIU_AK / QINIU_SK 已配置（值为空时 qshell 只报 "Name can't be empty"）
+        if: ${{ env.AK == '' || env.SK == '' }}
+        env: { AK: '${{ secrets.QINIU_AK }}', SK: '${{ secrets.QINIU_SK }}' }
+        run: |
+          echo "::error::secrets.QINIU_AK 或 QINIU_SK 为空：在仓库 Settings → Secrets → Actions 设置（与 loadout 同值）"
+          exit 1
+      - name: 下载 Release 资产
+        run: gh release download "$TAG" -R "${{ github.repository }}" -p '*-setup.exe' -D dist
+        env: { GH_TOKEN: '${{ github.token }}' }
+      - name: 安装 qshell
+        run: |
+          curl -fsSL https://github.com/qiniu/qshell/releases/download/v2.19.13/qshell-v2.19.13-linux-amd64.tar.gz | tar xzO > qshell
+          chmod +x qshell && echo "$PWD" >> "$GITHUB_PATH"
+          ./qshell account ${{ secrets.QINIU_AK }} ${{ secrets.QINIU_SK }} ci
+      - name: 上传（带版本号的原文件名 + 固定名 aegis-setup.exe）
+        run: |
+          cd dist
+          cp "$(ls *-setup.exe)" aegis-setup.exe
+          for f in *; do qshell fput "$BUCKET" "$PREFIX/$f" "$f" --overwrite; done
+      - name: 刷新 CDN（只有固定名会被覆盖）
+        run: |
+          echo "$CDN/$PREFIX/aegis-setup.exe" > urls.txt
+          qshell cdnrefresh -i urls.txt
