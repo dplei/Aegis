@@ -20,15 +20,18 @@
   </div>
   <main class="scroll" id="scroll">
   <div class="wrap content" style="padding-top:.5rem;padding-bottom:1.5rem">
-    <h1 style="font-size:1.125rem">录完了，留下吗？</h1>
+    <h1 id="heading" style="font-size:1.125rem">录完了，留下吗？</h1>
     <p class="desc" id="count"></p>
     <label class="field" style="padding:1rem 0 .25rem"><span>文件名</span>
       <input class="input" id="name" spellcheck="false" />
     </label>
     <p class="meta" id="path" style="word-break:break-all"></p>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:1.25rem">
+    <div class="save-actions">
       <button class="link danger" type="button" id="discard">不保存</button>
-      <button class="btn" type="button" id="save">保存</button>
+      <div class="save-actions-right">
+        <button class="ghost" type="button" id="continue" hidden>继续录制</button>
+        <button class="btn" type="button" id="save">保存</button>
+      </div>
     </div>
     <p class="toast" id="toast" style="margin-top:.75rem"></p>
   </div>
@@ -37,31 +40,115 @@
 <script>
 const { invoke } = window.__TAURI__.core
 const $ = (id) => document.getElementById(id)
-let cur
+let active = null
+let pendingPath = null
+let busy = false
 
-async function load() {
-  const list = await invoke('get_pending')
+function setBusy(v) {
+  busy = v
+  for (const id of ['save', 'continue', 'discard', 'name']) $(id).disabled = v
+}
+
+function resetDiscard() {
+  $('discard').classList.remove('arm')
+  $('discard').textContent = '不保存'
+}
+
+function renderActivePath() {
+  if (!active) return
+  const stem = $('name').value.trim() || active.default_name
+  const dir = String(active.out_dir).replace(/[\\/]+$/, '')
+  const suffix = active.first_game !== active.last_game ? ` · 沿用首款游戏 ${active.first_game} 命名` : ''
+  $('path').textContent = `${dir}\\${stem}.mp4${suffix}`
+}
+
+async function load({ keepToast = false } = {}) {
+  const state = await invoke('get_save_state')
+  if (!keepToast) $('toast').textContent = ''
+  resetDiscard()
+  setBusy(false)
+
+  if (state.active) {
+    active = state.active
+    pendingPath = null
+    $('heading').textContent = '游戏已退出，要继续吗？'
+    $('continue').hidden = false
+    $('win-close').setAttribute('aria-label', '关闭并按默认名保存')
+    $('count').textContent = state.pending.length > 0
+      ? `已暂停音画，等待期间不会录制。另有 ${state.pending.length} 段待命名录像保留在队列中。`
+      : `已暂停音画，等待期间不会录制。继续录制会记录 ${active.last_game} 所在屏幕，切到已启用游戏时自动接力。`
+    $('name').value = active.default_name
+    $('name').placeholder = active.default_name
+    renderActivePath()
+    await invoke('reveal_save')
+    $('name').focus(); $('name').select()
+    return
+  }
+
+  active = null
+  const list = state.pending || []
   if (!list.length) return window.__TAURI__.window.getCurrentWindow().close()
-  cur = list[0]
-  const file = cur.split(/[\\/]/).pop()
-  $('name').value = file.replace(/\.mp4$/i, '')
-  $('path').textContent = cur
+  pendingPath = list[0]
+  const file = pendingPath.split(/[\\/]/).pop()
+  const stem = file.replace(/\.mp4$/i, '')
+  $('heading').textContent = '录完了，留下吗？'
+  $('continue').hidden = true
+  $('win-close').setAttribute('aria-label', '稍后处理')
+  $('name').value = stem
+  $('name').placeholder = stem
+  $('path').textContent = pendingPath
   $('count').textContent = list.length > 1 ? `还有 ${list.length - 1} 段等着处理` : '已经按默认名存好了，不处理也不会丢。'
-  $('discard').classList.remove('arm'); $('discard').textContent = '不保存'
-  await reveal()
+  await invoke('reveal_save')
   $('name').focus(); $('name').select()
 }
-async function resolve(name) {
-  try { await invoke('resolve_pending', { path: cur, name }); load() } catch (e) { $('toast').textContent = String(e) }
+
+async function submitChoice(action, name = null) {
+  if (busy || !active) return
+  const { session_id: sessionId, choice_id: choiceId } = active
+  setBusy(true)
+  $('toast').textContent = ''
+  try {
+    const outcome = await invoke('resolve_choice', { sessionId, choiceId, action, name })
+    setBusy(false)
+    if (outcome === 'continued') return
+    await load()
+  } catch (e) {
+    setBusy(false)
+    $('toast').textContent = String(e)
+    await load({ keepToast: true })
+  }
 }
-$('save').onclick = () => resolve($('name').value.trim() || $('name').placeholder)
+
+async function resolvePending(name) {
+  if (busy || !pendingPath) return
+  setBusy(true)
+  $('toast').textContent = ''
+  try {
+    await invoke('resolve_pending', { path: pendingPath, name })
+    setBusy(false)
+    await load()
+  } catch (e) {
+    setBusy(false)
+    $('toast').textContent = String(e)
+  }
+}
+
+$('name').oninput = () => { if (active) renderActivePath() }
+$('continue').onclick = () => submitChoice('continue')
+$('save').onclick = () => {
+  const name = $('name').value.trim() || $('name').placeholder
+  if (active) submitChoice('save', name)
+  else resolvePending(name)
+}
 $('name').onkeydown = (e) => { if (e.key === 'Enter') $('save').click() }
 $('discard').onclick = () => {
+  if (busy) return
   const d = $('discard')
   if (!d.classList.contains('arm')) { d.classList.add('arm'); d.textContent = '确认移到回收站'; return }
-  resolve(null)
+  if (active) submitChoice('discard')
+  else resolvePending(null)
 }
-window.__TAURI__.event.listen('refresh', load)
+window.__TAURI__.event.listen('refresh', () => { if (!busy) load() })
 load()
 </script>
 </body>

@@ -4,13 +4,15 @@ mod recorder;
 mod win;
 
 use config::Config;
+use recorder::{ActiveChoice, ChoiceAction, ChoiceOutcome, RecordingStatus};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::mpsc::{channel, sync_channel, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
@@ -20,10 +22,14 @@ struct State {
     muted: Arc<AtomicBool>,
     tx: Mutex<Sender<recorder::Cmd>>,
     status: MenuItem<Wry>,
-    /// 正在录制：托盘图标闪红点
+    /// 正在实际录制（录游戏或录桌面）：托盘图标闪红点；暂停等待选择时不闪红
     recording: Arc<AtomicBool>,
-    /// 正在录的游戏名，给设置页提示「修改从下一次录制生效」
-    current: Mutex<Option<String>>,
+    /// 当前录制阶段，给设置页、托盘与保存弹窗同步展示
+    rec_status: Mutex<RecordingStatus>,
+    /// 当前暂停等待选择的会话上下文；首次有效操作或关窗后原子消费，避免重复触发
+    active_choice: Mutex<Option<ActiveChoice>>,
+    /// 控制保存弹窗 1.5s 兜底显示与隐藏之间的代际，避免隐藏后被旧定时任务重新弹出
+    save_show_gen: Arc<AtomicU64>,
 }
 
 fn st(app: &AppHandle) -> tauri::State<'_, State> {
@@ -60,18 +66,63 @@ pub fn set_recording_dir(app: &AppHandle, dir: Option<PathBuf>) {
     }
 }
 
-pub fn set_status(app: &AppHandle, game: Option<&str>) {
-    st(app).recording.store(game.is_some(), Relaxed);
-    *st(app).current.lock().unwrap() = game.map(Into::into);
-    let _ = app.emit_to("settings", "recording", game);
-    let text = match game {
-        Some(g) => format!("● 正在录制：{g}"),
-        None => "空闲：等待游戏启动".into(),
-    };
-    let _ = st(app).status.set_text(&text);
+fn format_tray_status(status: &RecordingStatus) -> String {
+    match status {
+        RecordingStatus::Idle => "空闲：等待游戏启动".into(),
+        RecordingStatus::Game { game } => format!("● 正在录制游戏：{game}"),
+        RecordingStatus::WaitingChoice { game } => format!("❚❚ 已暂停，等待选择（{game} 已退出）"),
+        RecordingStatus::Desktop { from_game, .. } => format!("● 正在录制桌面（{from_game} 所在屏幕）"),
+    }
+}
+
+pub fn set_status(app: &AppHandle, status: RecordingStatus) {
+    let s = st(app);
+    s.recording.store(status.is_actively_recording(), Relaxed);
+    *s.rec_status.lock().unwrap() = status.clone();
+    let _ = app.emit_to("settings", "recording_status", &status);
+    let text = format_tray_status(&status);
+    let _ = s.status.set_text(&text);
     if let Some(t) = app.tray_by_id("main") {
         let _ = t.set_tooltip(Some(format!("Aegis - {text}")));
     }
+}
+
+pub fn set_active_choice(app: &AppHandle, choice: Option<ActiveChoice>) {
+    *st(app).active_choice.lock().unwrap() = choice;
+}
+
+pub fn clear_active_choice(app: &AppHandle, session_id: Option<u64>) {
+    let s = st(app);
+    let mut guard = s.active_choice.lock().unwrap();
+    if session_id.is_none() || guard.as_ref().is_some_and(|c| Some(c.session_id) == session_id) {
+        *guard = None;
+    }
+}
+
+fn consume_matching_choice(slot: &mut Option<ActiveChoice>, session_id: u64, choice_id: u64) -> Option<ActiveChoice> {
+    if slot
+        .as_ref()
+        .is_some_and(|c| c.session_id == session_id && c.choice_id == choice_id)
+    {
+        slot.take()
+    } else {
+        None
+    }
+}
+
+fn should_show_save(app: &AppHandle) -> bool {
+    let s = st(app);
+    if s.active_choice.lock().unwrap().is_some() {
+        return true;
+    }
+    if matches!(*s.rec_status.lock().unwrap(), RecordingStatus::Desktop { .. }) {
+        return false;
+    }
+    config_snapshot(app).pending.iter().any(|p| p.exists())
+}
+
+pub fn show_save_window(app: &AppHandle) {
+    show_window(app, "save");
 }
 
 pub fn add_pending(app: &AppHandle, path: PathBuf) {
@@ -81,37 +132,122 @@ pub fn add_pending(app: &AppHandle, path: PathBuf) {
     show_window(app, "save");
 }
 
+/// 隐藏保存弹窗并同步确认其不可见（含 DWM 合成等待），用于恢复桌面录制前避免把弹窗录进去。
+pub fn hide_save_window_sync(app: &AppHandle) -> bool {
+    st(app).save_show_gen.fetch_add(1, Relaxed);
+    let query_and_hide = || -> Option<bool> {
+        let (tx, rx) = sync_channel(1);
+        let app2 = app.clone();
+        if app
+            .run_on_main_thread(move || {
+                let hidden = if let Some(w) = app2.get_webview_window("save") {
+                    let _ = w.hide();
+                    !w.is_visible().unwrap_or(true)
+                } else {
+                    true
+                };
+                let _ = tx.send(hidden);
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.recv_timeout(Duration::from_secs(3)).ok()
+    };
+
+    for _ in 0..20 {
+        match query_and_hide() {
+            Some(true) => {
+                win::dwm_flush();
+                win::dwm_flush();
+                std::thread::sleep(Duration::from_millis(40));
+                return true;
+            }
+            Some(false) => std::thread::sleep(Duration::from_millis(25)),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// 暂停等待选择被外部终止（如托盘跳过）时，同步刷新旧待命名列表或隐藏已空弹窗。
+pub fn refresh_or_hide_save_window(app: &AppHandle) {
+    let has_pending = config_snapshot(app).pending.iter().any(|p| p.exists());
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(w) = app2.get_webview_window("save") else { return };
+        if !w.is_visible().unwrap_or(false) {
+            return;
+        }
+        if has_pending {
+            let _ = w.emit_to("save", "refresh", ());
+        } else {
+            st(&app2).save_show_gen.fetch_add(1, Relaxed);
+            let _ = w.hide();
+        }
+    });
+}
+
+fn handle_save_window_closed(app: &AppHandle) {
+    let s = st(app);
+    s.save_show_gen.fetch_add(1, Relaxed);
+    let choice = s.active_choice.lock().unwrap().take();
+    if let Some(c) = choice {
+        let _ = s.tx.lock().unwrap().send(recorder::Cmd::Choice {
+            session_id: c.session_id,
+            choice_id: c.choice_id,
+            action: ChoiceAction::CloseDefault,
+            reply: None,
+        });
+    }
+}
+
+fn spawn_reveal_fallback(app: &AppHandle, label: &str, save_gen: Option<u64>) {
+    let app2 = app.clone();
+    let label2 = label.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        let app3 = app2.clone();
+        let _ = app2.run_on_main_thread(move || {
+            if let Some(gen) = save_gen {
+                if st(&app3).save_show_gen.load(Relaxed) != gen || !should_show_save(&app3) {
+                    return;
+                }
+            }
+            if let Some(w) = app3.get_webview_window(&label2) {
+                if !w.is_visible().unwrap_or(true) {
+                    log::warn!("{label2} 页面 1.5 秒内没画完，兜底显示");
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        });
+    });
+}
+
 fn show_window(app: &AppHandle, label: &str) {
     let app = app.clone();
     let label = label.to_string();
+    let save_gen = (label == "save").then(|| st(&app).save_show_gen.fetch_add(1, Relaxed) + 1);
     // 可能在后台线程调用；窗口要在主线程建
     let _ = app.clone().run_on_main_thread(move || {
         if let Some(w) = app.get_webview_window(&label) {
             let _ = w.emit_to(&label, "refresh", ());
+            if label == "save" && !w.is_visible().unwrap_or(false) {
+                // 已隐藏复用时等页面刷新完成后由 reveal_save 显示，避免先闪出一帧旧内容
+                spawn_reveal_fallback(&app, &label, save_gen);
+                return;
+            }
             let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();
             return;
         }
-        let (title, w, h, top) = if label == "save" { ("保存录像", 480.0, 380.0, true) } else { ("Aegis 设置", 760.0, 720.0, false) };
+        let (title, w, h, top) = if label == "save" { ("保存录像", 480.0, 410.0, true) } else { ("Aegis 设置", 760.0, 720.0, false) };
         // 先隐藏着建：新建 WebView 要约 0.4 秒才画出页面，直接显示会先黑一下。页面渲染完自己调 reveal() 显示；
         // 页面脚本出错没调到时，1.5 秒后兜底显示
-        let app2 = app.clone();
-        let label2 = label.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            let app3 = app2.clone();
-            let _ = app2.run_on_main_thread(move || {
-                if let Some(w) = app3.get_webview_window(&label2) {
-                    if !w.is_visible().unwrap_or(true) {
-                        log::warn!("{label2} 页面 1.5 秒内没画完，兜底显示");
-                        let _ = w.show();
-                        let _ = w.set_focus();
-                    }
-                }
-            });
-        });
-        let _ = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("{label}.html").into()))
+        spawn_reveal_fallback(&app, &label, save_gen);
+        let built = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(format!("{label}.html").into()))
             .visible(false)
             .title(title)
             .inner_size(w, h)
@@ -126,6 +262,16 @@ fn show_window(app: &AppHandle, label: &str) {
             .disable_drag_drop_handler()
             .center()
             .build();
+        if let Ok(win) = built {
+            if label == "save" {
+                let app_close = app.clone();
+                win.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        handle_save_window_closed(&app_close);
+                    }
+                });
+            }
+        }
     });
 }
 
@@ -252,8 +398,82 @@ async fn export_logs(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn recording_game(app: AppHandle) -> Option<String> {
-    st(&app).current.lock().unwrap().clone()
+fn recording_status(app: AppHandle) -> RecordingStatus {
+    st(&app).rec_status.lock().unwrap().clone()
+}
+
+#[derive(serde::Serialize)]
+struct SaveDialogState {
+    active: Option<ActiveChoice>,
+    pending: Vec<PathBuf>,
+}
+
+#[tauri::command]
+fn get_save_state(app: AppHandle) -> SaveDialogState {
+    let active = st(&app).active_choice.lock().unwrap().clone();
+    let pending = get_pending(app);
+    SaveDialogState { active, pending }
+}
+
+/// 仅在确实处于等待选择或（非桌面录制且有待命名条目）时显示保存弹窗，防止过期渲染把弹窗重新带出。
+#[tauri::command]
+fn reveal_save(app: AppHandle) {
+    if !should_show_save(&app) {
+        return;
+    }
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app2.get_webview_window("save") {
+            if !w.is_visible().unwrap_or(false) {
+                let _ = w.show();
+            }
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+    });
+}
+
+#[tauri::command]
+async fn resolve_choice(
+    app: AppHandle,
+    session_id: u64,
+    choice_id: u64,
+    action: String,
+    name: Option<String>,
+) -> Result<ChoiceOutcome, String> {
+    let parsed = match action.as_str() {
+        "continue" => ChoiceAction::Continue,
+        "save" => ChoiceAction::Save(name.unwrap_or_default()),
+        "discard" => ChoiceAction::Discard,
+        _ => return Err("不支持的操作".into()),
+    };
+    let consumed = {
+        let s = st(&app);
+        let mut guard = s.active_choice.lock().unwrap();
+        consume_matching_choice(&mut guard, session_id, choice_id)
+    };
+    if consumed.is_none() {
+        return Ok(ChoiceOutcome::Stale);
+    }
+    let (reply_tx, reply_rx) = sync_channel(1);
+    st(&app)
+        .tx
+        .lock()
+        .unwrap()
+        .send(recorder::Cmd::Choice {
+            session_id,
+            choice_id,
+            action: parsed,
+            reply: Some(reply_tx),
+        })
+        .map_err(|_| "录制线程不可用".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        reply_rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| "等待录制线程处理超时".to_string())?
+    })
+    .await
+    .map_err(|e| format!("处理操作失败：{e}"))?
 }
 
 #[tauri::command]
@@ -269,7 +489,7 @@ struct RunningWindow {
 
 #[tauri::command]
 fn list_windows() -> Vec<RunningWindow> {
-    let procs = win::processes();
+    let procs = win::processes().unwrap_or_default();
     let mut out: Vec<RunningWindow> = win::windows()
         .into_iter()
         .filter(|w| w.pid != std::process::id())
@@ -427,8 +647,9 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            get_config, set_config, preview_name, list_windows, list_mics, get_pending, resolve_pending, open_folder, check_dir, make_dir, pick_dir,
-            autostart_status, export_logs, recording_game
+            get_config, set_config, preview_name, list_windows, list_mics, get_pending, resolve_pending,
+            get_save_state, reveal_save, resolve_choice, open_folder, check_dir, make_dir, pick_dir,
+            autostart_status, export_logs, recording_status
         ])
         .setup(|app| {
             let h = app.handle().clone();
@@ -465,7 +686,17 @@ fn main() {
             let (tx, rx) = channel();
             let muted = Arc::new(AtomicBool::new(false));
             let recording = Arc::new(AtomicBool::new(false));
-            app.manage(State { cfg: Mutex::new(cfg), cfg_path, muted: muted.clone(), tx: Mutex::new(tx), status, recording: recording.clone(), current: Mutex::new(None) });
+            app.manage(State {
+                cfg: Mutex::new(cfg),
+                cfg_path,
+                muted: muted.clone(),
+                tx: Mutex::new(tx),
+                status,
+                recording: recording.clone(),
+                rec_status: Mutex::new(RecordingStatus::Idle),
+                active_choice: Mutex::new(None),
+                save_show_gen: Arc::new(AtomicU64::new(0)),
+            });
             blink_tray(app.handle().clone(), recording);
 
             TrayIconBuilder::with_id("main")
@@ -538,6 +769,38 @@ mod tests {
         assert!(apply_autostart_with(true, denied, |_| Err("拒绝访问".into())).is_err());
         // 关闭：两边都清
         assert_eq!(apply_autostart_with(false, |_| Ok(()), lnk), Ok(Autostart::Off));
+    }
+
+    #[test]
+    fn tray_status_and_single_consume_choice() {
+        assert_eq!(format_tray_status(&RecordingStatus::Idle), "空闲：等待游戏启动");
+        assert!(format_tray_status(&RecordingStatus::Game { game: "LOL".into() }).contains("正在录制游戏"));
+        assert!(format_tray_status(&RecordingStatus::WaitingChoice { game: "LOL".into() }).contains("已暂停，等待选择"));
+        let desk = format_tray_status(&RecordingStatus::Desktop {
+            from_game: "LOL".into(),
+            monitor_name: r"\\.\DISPLAY2".into(),
+        });
+        assert!(desk.contains("正在录制桌面"));
+        assert!(desk.contains("LOL"));
+        assert!(!RecordingStatus::WaitingChoice { game: "LOL".into() }.is_actively_recording());
+        assert!(RecordingStatus::Desktop { from_game: "LOL".into(), monitor_name: "".into() }.is_actively_recording());
+
+        let mut slot = Some(ActiveChoice {
+            session_id: 3,
+            choice_id: 7,
+            first_game: "LOL".into(),
+            last_game: "Apex".into(),
+            default_name: "LOL_2026-11-19 15-30-00".into(),
+            out_dir: PathBuf::from(r"D:\Videos"),
+            monitor_name: Some(r"\\.\DISPLAY1".into()),
+        });
+        // 不匹配 session_id / choice_id 时不消费
+        assert!(consume_matching_choice(&mut slot, 2, 7).is_none());
+        assert!(consume_matching_choice(&mut slot, 3, 6).is_none());
+        assert!(slot.is_some());
+        // 首次匹配消费成功，重复提交被拒绝
+        assert!(consume_matching_choice(&mut slot, 3, 7).is_some());
+        assert!(consume_matching_choice(&mut slot, 3, 7).is_none());
     }
 }
 

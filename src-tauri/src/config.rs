@@ -32,6 +32,9 @@ pub struct Config {
     /// wasapi 设备 id，None = 系统默认麦克风
     pub mic_device: Option<String>,
     pub autostart: bool,
+    /// 游戏退出后暂停录制并询问是否继续录桌面等待下一款游戏（默认关闭，旧配置缺失也按关闭处理）
+    #[serde(default)]
+    pub continue_after_exit: bool,
     /// 已按默认名保存、还等着用户确认命名的视频
     #[serde(default)]
     pub pending: Vec<PathBuf>,
@@ -67,6 +70,7 @@ impl Config {
             mic_enabled: true,
             mic_device: None,
             autostart: true,
+            continue_after_exit: false,
             pending: vec![],
             recording: None,
         }
@@ -185,5 +189,36 @@ mod tests {
         assert_eq!(render_name("  ...", "X", t), "recording");
         assert_eq!(bitrate_kbps(1920, 1080), 12_000);
         assert_eq!(Config::new(PathBuf::new()).canvas((3840, 2160)), (1920, 1080));
+    }
+
+    #[test]
+    fn legacy_config_defaults_continue_after_exit_off() {
+        let json = r#"{
+            "games": [],
+            "scope": "window",
+            "out_dir": "D:\\Videos\\Aegis",
+            "resolution": 1080,
+            "name_template": "${game}_${time:YYYY-MM-DD HH:mm:ss}",
+            "mic_enabled": true,
+            "mic_device": null,
+            "autostart": true
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(!cfg.continue_after_exit);
+        assert!(!Config::new(PathBuf::new()).continue_after_exit);
+
+        let json_on = r#"{
+            "games": [],
+            "scope": "window",
+            "out_dir": "D:\\Videos\\Aegis",
+            "resolution": 1080,
+            "name_template": "${game}_${time:YYYY-MM-DD HH:mm:ss}",
+            "mic_enabled": true,
+            "mic_device": null,
+            "autostart": true,
+            "continue_after_exit": true
+        }"#;
+        let cfg_on: Config = serde_json::from_str(json_on).unwrap();
+        assert!(cfg_on.continue_after_exit);
     }
 }

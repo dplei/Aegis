@@ -1,17 +1,20 @@
 //! 薄薄一层 Win32：进程、窗口、显示器、磁盘、回收站。
 use std::path::Path;
 use windows::core::{BOOL, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Dwm::{DwmFlush, DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayDevicesW, GetMonitorInfoW, MonitorFromWindow, DISPLAY_DEVICEW, MONITORINFO,
+    MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
+    EnumWindows, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
 };
 
 fn wide(s: &str) -> Vec<u16> {
@@ -23,20 +26,34 @@ fn from_wide(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..n])
 }
 
-/// (pid, exe 名)
-pub fn processes() -> Vec<(u32, String)> {
+/// (pid, exe 名)；枚举失败时返回 Err，避免把失败误判为「所有游戏进程已退出」。
+pub fn processes() -> Result<Vec<(u32, String)>, String> {
     let mut out = vec![];
     unsafe {
-        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            .map_err(|e| format!("创建进程快照失败：{e}"))?;
         let mut e = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
-        let mut ok = Process32FirstW(snap, &mut e).is_ok();
-        while ok {
+        if let Err(err) = Process32FirstW(snap, &mut e) {
+            let _ = CloseHandle(snap);
+            return Err(format!("读取首个进程失败：{err}"));
+        }
+        loop {
             out.push((e.th32ProcessID, from_wide(&e.szExeFile)));
-            ok = Process32NextW(snap, &mut e).is_ok();
+            match Process32NextW(snap, &mut e) {
+                Ok(()) => {}
+                Err(err) if err.code() == ERROR_NO_MORE_FILES.to_hresult() => break,
+                Err(err) => {
+                    let _ = CloseHandle(snap);
+                    return Err(format!("枚举后续进程失败：{err}"));
+                }
+            }
         }
         let _ = CloseHandle(snap);
     }
-    out
+    if out.is_empty() {
+        return Err("进程快照为空".into());
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Debug)]
@@ -81,14 +98,89 @@ pub fn windows() -> Vec<Win> {
     out
 }
 
-/// 窗口所在显示器：(HMONITOR, 宽, 高)
-pub fn monitor_of(hwnd: isize) -> (isize, u32, u32) {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MonitorRef {
+    pub hmon: isize,
+    pub name: String,
+    /// 物理显示器的 PnP 设备接口路径（EDD_GET_DEVICE_INTERFACE_NAME），用于核验桌面录制授权。
+    pub device_id: Option<String>,
+}
+
+impl MonitorRef {
+    pub fn obs_monitor_id(&self) -> &str {
+        self.device_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.name)
+    }
+}
+
+/// 查询 GDI 显示设备名（如 `\\.\DISPLAY1`）对应的物理显示器 PnP 设备接口路径。
+pub fn monitor_device_id(gdi_name: &str) -> Option<String> {
+    const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 0x0000_0001;
+    if gdi_name.is_empty() {
+        return None;
+    }
+    let dev_name = wide(gdi_name);
+    let mut dd = DISPLAY_DEVICEW {
+        cb: size_of::<DISPLAY_DEVICEW>() as u32,
+        ..Default::default()
+    };
     unsafe {
-        let m = MonitorFromWindow(HWND(hwnd as _), MONITOR_DEFAULTTONEAREST);
-        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let _ = GetMonitorInfoW(m, &mut mi);
-        let r = mi.rcMonitor;
-        (m.0 as isize, (r.right - r.left) as u32, (r.bottom - r.top) as u32)
+        if EnumDisplayDevicesW(PCWSTR(dev_name.as_ptr()), 0, &mut dd, EDD_GET_DEVICE_INTERFACE_NAME).as_bool() {
+            let id = from_wide(&dd.DeviceID);
+            if !id.is_empty() {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// 窗口当前所在显示器：(MonitorRef, 宽, 高)；窗口失效或查询失败时返回 None。
+pub fn monitor_of_valid(hwnd: isize) -> Option<(MonitorRef, u32, u32)> {
+    let h = HWND(hwnd as _);
+    unsafe {
+        if !IsWindow(Some(h)).as_bool() {
+            return None;
+        }
+        let m = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+        if m.is_invalid() {
+            return None;
+        }
+        let mut mi = MONITORINFOEXW::default();
+        mi.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(m, &mut mi as *mut MONITORINFOEXW as *mut MONITORINFO).as_bool() {
+            return None;
+        }
+        let r = mi.monitorInfo.rcMonitor;
+        let w = (r.right - r.left).max(0) as u32;
+        let h = (r.bottom - r.top).max(0) as u32;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let name = from_wide(&mi.szDevice);
+        let device_id = monitor_device_id(&name);
+        Some((MonitorRef { hmon: m.0 as isize, name, device_id }, w, h))
+    }
+}
+
+/// 当前前台顶层窗口 HWND（无前台窗口或已最小化时返回 None）。
+pub fn foreground_window() -> Option<isize> {
+    unsafe {
+        let h = GetForegroundWindow();
+        if h.is_invalid() || IsIconic(h).as_bool() {
+            None
+        } else {
+            Some(h.0 as isize)
+        }
+    }
+}
+
+/// 等待 DWM 完成下一帧合成（隐藏弹窗后调用，避免首帧录到弹窗残影）。
+pub fn dwm_flush() {
+    unsafe {
+        let _ = DwmFlush();
     }
 }
 
@@ -161,7 +253,8 @@ mod tests {
         assert!(super::recycle(&p));
         assert!(!p.exists());
         assert!(super::disk_free(&std::env::temp_dir()) > 0);
-        assert!(!super::processes().is_empty());
+        assert!(!super::processes().unwrap().is_empty());
+        assert!(super::obs_window_id(0).is_none());
     }
 }
 
@@ -193,6 +286,9 @@ pub fn default_mic() -> Option<String> {
 pub fn obs_window_id(hwnd: isize) -> Option<String> {
     use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
     let h = HWND(hwnd as _);
+    if !unsafe { IsWindow(Some(h)).as_bool() } {
+        return None;
+    }
     let (mut t, mut c) = ([0u16; 256], [0u16; 256]); // 缓冲全 0，from_wide 读到第一个 0 为止
     unsafe {
         GetWindowTextW(h, &mut t);
@@ -201,7 +297,10 @@ pub fn obs_window_id(hwnd: isize) -> Option<String> {
     let (title, class) = (from_wide(&t), from_wide(&c));
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
-    let exe = processes().into_iter().find(|p| p.0 == pid)?.1;
+    if pid == 0 {
+        return None;
+    }
+    let exe = processes().ok()?.into_iter().find(|p| p.0 == pid)?.1;
     let enc = |s: &str| s.replace('#', "#22").replace(':', "#3A");
     Some(format!("{}:{}:{}", enc(&title), enc(&class), enc(&exe)))
 }

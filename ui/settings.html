@@ -51,6 +51,12 @@
           <div class="grow"><strong>分辨率</strong></div>
           <div class="seg" id="res"></div>
         </div>
+        <div class="row">
+          <div class="grow">
+            <button class="switch" type="button" role="switch" id="continue-after-exit" aria-describedby="continue-desc"><span class="track"></span><span>游戏退出后可继续录制</span></button>
+            <p class="desc" id="continue-desc" style="margin-top:.375rem">开启后，游戏退出时先暂停音画并询问去留，等待期间不会录制。选择「继续录制」后录上一款游戏最后所在的屏幕（仅保留麦克风），切入已启用游戏时自动接力并合为同一 MP4；随时可在弹窗或托盘结束或跳过。</p>
+          </div>
+        </div>
       </section>
 
       <section aria-labelledby="g-audio">
@@ -148,12 +154,24 @@ function moveGame(from, to) {
   cfg.games.splice(to, 0, ...cfg.games.splice(from, 1))
   save(); render()
 }
-function recBanner(game) {
-  $('rec-banner').hidden = !game
-  $('rec-banner').textContent = game ? `正在录制 ${game}，修改将从下一次录制生效` : ''
+function recBanner(status) {
+  const el = $('rec-banner')
+  if (!status || status.kind === 'idle') {
+    el.hidden = true
+    el.textContent = ''
+    return
+  }
+  el.hidden = false
+  if (status.kind === 'game') {
+    el.textContent = `正在录制游戏 ${status.game}，修改将从下一次录制生效`
+  } else if (status.kind === 'waiting_choice') {
+    el.textContent = `已暂停，等待选择（${status.game} 已退出），暂停期间不会录制；修改将从下一次录制生效`
+  } else if (status.kind === 'desktop') {
+    el.textContent = `正在录制桌面（${status.from_game} 所在屏幕），切入已启用游戏后自动接力；修改将从下一次录制生效`
+  }
 }
-window.__TAURI__.event.listen('recording', (e) => recBanner(e.payload))
-invoke('recording_game').then(recBanner)
+window.__TAURI__.event.listen('recording_status', (e) => recBanner(e.payload))
+invoke('recording_status').then(recBanner)
 
 function renderGames() {
   $('games').replaceChildren(...cfg.games.map((g, i) => {
@@ -217,6 +235,7 @@ function render() {
   const h = cfg.resolution || 2160
   const mbps = Math.min(60, Math.max(2.5, 12 * (h * h) / (1080 * 1080)))
   $('rec-meta').textContent = `HEVC 硬件编码（NVENC）· 60fps · ${cfg.resolution ? '' : '以 4K 显示器为例 '}约 ${mbps.toFixed(1)} Mbps，每小时约 ${(mbps * 0.45).toFixed(1)} GB`
+  sw($('continue-after-exit'), !!cfg.continue_after_exit, (v) => { cfg.continue_after_exit = v; save() })
   sw($('mic'), cfg.mic_enabled, (v) => { cfg.mic_enabled = v; save() })
   $('mic-dev').disabled = !cfg.mic_enabled
   sw($('autostart'), cfg.autostart, (v) => { cfg.autostart = v; save() })
